@@ -2525,40 +2525,58 @@ module TCE = struct
 		| RValue of 'a
 		| RError of string
 
-	type func =
-		| FnLocal of tvar
-		| FnLocal2 of tvar * tvar * BasicBlock.t * BasicBlock.t  (* outer *  inner * begin block * end block *)
-		| FnStatic of tclass * tclass_field * int
-		| FnInstance of tclass * tclass_field * int
+	type fdata_kind =
+		| FKStatic of tclass * tclass_field
+		| FKInstance of tclass * tclass_field
+		| FKLocal
+
+	type fdata = {
+		f_index        : int;                                   (* the index used for the switch *)
+		f_tf           : tfunc;
+		f_call_var_m   : (int,tvar) PMap.t;                     (* the local var used as tmp var to 'call' this function *)
+		f_call_vars    : (tvar * tvar * tconstant option) list; (* list of argument * call_tmp_var * optional value *)
+		f_bb_begin     : BasicBlock.t;                          (* relevant blocks *)
+		f_bb_end       : BasicBlock.t;
+		f_bb_decl      : BasicBlock.t option;
+		mutable f_is_entry : bool;
+		mutable f_kind : fdata_kind;                            (* defaults to FKLocal, needs to be changed after *)
+	(*	f_exclude   : bool;               (* exclude from transformation *)
+		f_selfrec   : bool;               (* does it call itself? *)
+		f_mutualrec : bool;               (* does it call others in the same group? *) *)
+	}
+
+	let mk_fdata f_index f_tf f_call_var_m f_call_vars f_bb_begin f_bb_end f_bb_decl f_kind =
+		{ f_index; f_tf; f_call_var_m; f_call_vars; f_bb_begin; f_bb_end; f_bb_decl; f_is_entry=false; f_kind }
 
 	type mctx = {
-		mutable funcs : (int,int) PMap.t;
-		mutable fdata : func IntMap.t;
-		mutable cid : int;
+		mutable funcs_by_vid : (int, fdata) PMap.t;
+		mutable funcs_by_idx : (int, fdata) PMap.t;
+		mutable funcs_by_bbid: (int, fdata) PMap.t;
+		mutable funcs_by_field : (int, fdata) PMap.t;
+		mutable captured_vars : (int,tvar) PMap.t;
+		mutable recursive_calls : (int,(BasicBlock.t * int * fdata * texpr list * texpr option)) PMap.t;
+		(* bb * idx * fdata * args * `this`*)
 		actx : analyzer_context
 	}
 
 	let debug = false
 
-	let rec s_with_id te = if debug then  (match te.eexpr with
-		| TVar(v,Some({eexpr=TLocal v2})) -> (Printf.sprintf "%d :: %s = :: %d %s" v.v_id v.v_name v2.v_id v2.v_name )
-		| TVar(v, Some te) ->
-				(Printf.sprintf "var %s %d :: %s " v.v_name v.v_id (s_with_id te) )
-		| TCall({eexpr=TLocal v},_) -> (
-				Printf.sprintf "%d :: %s" v.v_id (s_expr_pretty te) )
-		| TCall({eexpr= TField(_ , (FInstance(c,_,cf) | FStatic(c,cf) ) )},_) ->
-				(Printf.sprintf "%s.%s :: %s" (snd c.cl_path) cf.cf_name (s_expr_pretty te) )
-		| TReturn (Some te) -> "RETURN " ^ s_with_id te
-		| TBinop (OpAssign,{eexpr=TLocal v},e2) ->
-				(Printf.sprintf "%d :: %s" v.v_id (s_with_id e2) )
-		| _ -> (s_expr_pretty te)
-	) else ""
+	let original_var_id ctx v =
+		let vo = Graph.get_var_origin ctx.actx.graph v in
+		vo.v_id
 
-	let do_p_s_id s id = print_endline (Printf.sprintf "%s id: %d " s id)
-	let p_s_id s id = if debug then do_p_s_id s id
-	let p_s_id2 s id id2 = if debug then print_endline (Printf.sprintf "%s ids: %d %d " s id id2)
+	let foldi f acc l =
+		let rec loop i acc xs = (match xs with
+				| [] -> acc
+				| x :: xs -> let acc = f i acc x in loop (i+1) acc xs
+			)
+		in loop 0 acc l
 
-	(* TODO migrate into Graph *)
+	let dopsid s id = print_endline (Printf.sprintf "%s id: %d " s id)
+	let p_s_id s id = if debug then dopsid s id
+
+	(* TODO migrate into Graph ? *)
+
 	let iter_dom_sub_tree bb_start bb_term f =
 		let rec loop bb =
 			if bb.bb_id != bb_term.bb_id then begin
@@ -2567,7 +2585,7 @@ module TCE = struct
 			end else ()
 		in loop bb_start
 
-	let fold_dom_tree acc bb bb_term f =
+	let fold_dom_tree bb bb_term f acc =
 		let rec loop acc bb =
 			let acc = f acc bb in
 			if bb.bb_id != bb_term.bb_id then
@@ -2576,53 +2594,77 @@ module TCE = struct
 				acc
 		in loop acc bb
 
-	let s_cfg_edge_kind = function
-		| CFGGoto -> "CFGGoto"
-		| CFGFunction -> "CFGFunction"
-		| CFGMaybeThrow -> "CFGMaybeThrow"
-		| CFGCondBranch e -> "CFGCondBranch " ^ (s_expr_pretty e)
-		| CFGCondElse -> "CFGCondElse"
+	let fold_dom_tree_filter filter f acc bb =
+		let rec loop acc bb =
+			let acc = f acc bb in
+			List.fold_left loop acc (List.filter filter bb.bb_dominated)
+		in loop acc bb
 
-	let s_cfg_edge e = Printf.sprintf " from:%d to:%d kind: %s" e.cfg_from.bb_id e.cfg_to.bb_id (s_cfg_edge_kind e.cfg_kind)
+	let get_func_end_block bb_begin =  begin match (
+			fold_dom_tree_filter
+			(fun bb -> match bb.bb_kind with BKFunctionBegin -> false | _ -> true )
+			(fun acc bb -> match bb.bb_kind with BKFunctionEnd -> bb :: acc | _ -> acc)
+			[]
+			bb_begin
+		) with
+			| [bb] -> bb
+			| _ -> assert false (* invalid assumption *)
+		end
 
+	let get_func_decl_block bb_begin = (match bb_begin.bb_incoming with
+		| [{cfg_from=bb;cfg_kind=CFGFunction}] -> bb
+		| _ -> assert false (*invalid assumption*)
+	)
+
+
+	(* TODO make independent from a single graph *)
+	let mk_func_maps mctx = begin
+		let g = mctx.actx.graph in
+		let f_ord = List.sort compare (Hashtbl.fold (fun bb_id _ acc -> bb_id :: acc ) g.g_functions []) in
+		let (bbm,idxm) = foldi ( fun idx (bbm,idxm) bb_id ->
+			let (bb,t,pos,tf) = Hashtbl.find g.g_functions bb_id in
+
+			let bb_end  = get_func_end_block bb in
+
+			let bb_decl =
+				let bb_decl = get_func_decl_block bb in
+				if bb_decl.bb_id = g.g_root.bb_id then None else Some(bb_decl) in
+
+			let (call_vars_rev,call_var_m) = List.fold_left ( fun (l,m) (v,co) ->
+					let cv = alloc_var (Printf.sprintf "_tce_%d_%s" idx v.v_name) v.v_type in (* defining the call tmp vars here *)
+					let m = PMap.add v.v_id cv m in
+					let l = (v,cv,co) :: l in
+					(l,m)
+				) ([],PMap.empty) tf.tf_args in
+			let call_vars = List.rev call_vars_rev in
+			let fdata = mk_fdata idx tf call_var_m call_vars bb bb_end bb_decl FKLocal in
+			(PMap.add bb_id fdata bbm),(PMap.add idx fdata idxm)
+
+		) (PMap.empty,PMap.empty) f_ord in
+		mctx.funcs_by_idx <- idxm;
+		mctx.funcs_by_bbid <- bbm
+	end
+
+	let add_func_by_vid mctx vid bb_id =
+		mctx.funcs_by_vid <- PMap.add vid (PMap.find bb_id mctx.funcs_by_bbid) mctx.funcs_by_vid
+
+	let find_func_by_vid mctx vid =
+		( try Some(PMap.find vid mctx.funcs_by_vid) with Not_found -> None )
+
+	let add_func_by_field mctx c cf bb_id is_entry = begin
+		let fid = Hashtbl.hash (c.cl_path,cf.cf_name) in
+		let kind = if PMap.exists cf.cf_name c.cl_statics then FKStatic(c,cf) else FKInstance(c,cf) in
+		let fdata = (PMap.find bb_id mctx.funcs_by_bbid) in
+		fdata.f_kind <- kind;
+		fdata.f_is_entry <- is_entry;
+		mctx.funcs_by_field <- PMap.add fid fdata mctx.funcs_by_field
+	end
+
+	let find_func_by_field mctx c cf =
+		let fid = Hashtbl.hash (c.cl_path,cf.cf_name) in
+		( try Some(PMap.find fid mctx.funcs_by_field) with Not_found -> None )
 
 	let p_tree_ids bb = if debug then print_endline (Printf.sprintf "bb.id::%d" bb.bb_id)
-
-	let original_var_id ctx v =
-		let vo = Graph.get_var_origin ctx.actx.graph v in
-		vo.v_id
-
-	let get_blocks_relevant_for_func_declaration mctx bb bb_func_id =
-		(match bb.bb_incoming with
-		| [{cfg_from={bb_kind=BKFunctionEnd} as bb_fend};{cfg_from=bb_fdecl}]
-		| [{cfg_from=bb_fdecl};{cfg_from={bb_kind=BKFunctionEnd} as bb_fend}] ->
-			let bb_fstart = Hashtbl.find mctx.actx.graph.g_nodes bb_func_id in
-			(bb_fdecl,bb_fstart,bb_fend)
-		| _ -> (* unexpected cfg structure *) assert false )
-
-	let set_f_id mctx f = begin (*TODO - deal with collisions *)
-		let (m,cid) = (mctx.funcs,mctx.cid) in (match f with
-		| FnLocal v ->
-			let oid = (original_var_id mctx v) in
-			p_s_id "adding func with oid" oid;
-			let m =  PMap.add oid (cid + 1) m in
-			mctx.funcs <- m;
-			mctx.cid <- cid + 1
-		| FnLocal2 (o,i,bb,_) ->
-			mctx.cid <- cid + 1;
-			let oids = (List.map (original_var_id mctx) [o;i]) in
-			let m = List.fold_left ( fun m id -> PMap.add id mctx.cid m ) m oids in
-			List.iter  (p_s_id "adding func with id ") oids;
-			mctx.funcs <- m;
-			mctx.fdata <- IntMap.add (mctx.cid) f mctx.fdata
-		| FnStatic(c,cf,bb_id) | FnInstance(c,cf,bb_id) ->
-			let fid = Hashtbl.hash (c.cl_path,cf.cf_name) in
-			let m = PMap.add fid (cid + 1) m in
-			mctx.funcs <- m;
-			mctx.cid <- cid + 1;
-			mctx.fdata <- IntMap.add (cid+1) f mctx.fdata
-
-	) end
 
 		(* 1. modify function-begin
 		*    declare + assign call-replacement variables, 1 for each argument, and optionally `this`
@@ -2637,7 +2679,7 @@ module TCE = struct
 		* 7. replace all goto function-ends with gotos to loop-head for the recursive calls
 		* *)
 
-	let transform mctx bb_dom rec_map =
+	let transform mctx bb_dom  =
 		let g = mctx.actx.graph in
 		let tvoid = mctx.actx.com.basic.tvoid  in
 		let tint = mctx.actx.com.basic.tint in
@@ -2647,18 +2689,12 @@ module TCE = struct
 			let e = mk (TVar( v, value)) tvoid null_pos in
 			Graph.add_texpr g bb e
 		in
+
+		let mk_local v = mk(TLocal v) v.v_type null_pos in
+
 		let close_blocks l = List.iter (fun bb -> bb.bb_closed <- true ) l in
 
-		let get_tfunc bb_id =
-			let (bb,_,_,tf) = Hashtbl.find g.g_functions bb_id in bb,tf
-		in
-		let get_tfunc_by_fid fid = (match IntMap.find fid mctx.fdata with
-			| FnLocal2(_,_,bbfstart,_) -> snd (get_tfunc bbfstart.bb_id)
-			| FnInstance(_,_,bbfstart)
-			| FnStatic(_,_,bbfstart) -> snd (get_tfunc bbfstart)
-			| _ -> assert false
-		)
-		in
+		let fdata_entry = PMap.find bb_dom.bb_id mctx.funcs_by_bbid in
 
 		(* let bb_next bb = create_node g BKNormal bb bb.bb_type bb.bb_pos in *)
 
@@ -2675,6 +2711,29 @@ module TCE = struct
 		Graph.add_cfg_edge g bb_loophead bb_switch CFGGoto;
 
 		Graph.set_syntax_edge g bb_while (SEWhile(bb_switch,g.g_unreachable));
+
+		(* declare/define tmp call vars, captured vars and arguments outside the main loop in bb_setup  *)
+
+		PMap.iter ( fun idx f ->
+			List.iter ( fun (v,cv,co) ->
+				let value = if f.f_is_entry then
+					Some(mk_local v)
+				else begin
+					v.v_name <- (Printf.sprintf "_arg%d_%s" idx v.v_name); (* unique name for non-entry function args *)
+					define_var bb_setup v None;
+					None
+				end in
+				define_var bb_setup cv value;
+			) f.f_call_vars;
+		) mctx.funcs_by_idx;
+
+		PMap.iter ( fun id v ->
+			(* exclude entry function arguments and the local functions themselves *)
+			if not ((PMap.exists v.v_id fdata_entry.f_call_var_m) || (PMap.exists (original_var_id mctx v) mctx.funcs_by_vid)) then
+				let oid = original_var_id mctx v in
+				v.v_name <-  (Printf.sprintf "_tce_cap_%d_%s" oid v.v_name); (* give it a horrible unique name *)
+				define_var bb_setup v None;
+		) mctx.captured_vars;
 
 		(* hook up entry begin - only write after bb_cases are set up *)
 
@@ -2695,8 +2754,8 @@ module TCE = struct
 		let mk_int i =  (mk (TConst( TInt(Int32.of_int i)))  tint null_pos) in
 		let tce_loop_var =
 				alloc_var "_hx_tce_current_function" tint in
-		(*TODO don't hardcode the 0 *)
-		define_var bb_setup tce_loop_var (Some (mk (TConst( TInt(Int32.of_int 0)))  tint null_pos));
+
+		define_var bb_setup tce_loop_var (Some (mk (TConst( TInt(Int32.of_int fdata_entry.f_index)))  tint null_pos));
 
 		add_texpr g bb_switch (wrap_meta ":cond-branch" (mk (TLocal(tce_loop_var)) tce_loop_var.v_type null_pos));
 
@@ -2706,17 +2765,22 @@ module TCE = struct
 		p_s_id "bb_switch " bb_switch.bb_id;
 
 		let assign_var v evalue =
-				let ev = mk (TLocal v) v.v_type null_pos in
-				mk (TBinop(OpAssign,ev,evalue)) v.v_type null_pos
+			let ev = mk (TLocal v) v.v_type null_pos in
+			mk (TBinop(OpAssign,ev,evalue)) v.v_type null_pos
 		in
 
-		let bb_cases = List.map ( fun (idx,f) -> (
+		let bb_cases = PMap.foldi ( fun idx fdata acc  -> ( (* each case corresponds to one of the functions tce is being applied to *)
+
 			let bb_case = Graph.create_node g BKConditional [] bb_switch bb_dom.bb_type null_pos in
-			p_s_id2 "bb_case " idx bb_case.bb_id;
+
 			let te = mk (TConst (TInt (Int32.of_int idx))) t_dynamic null_pos in
 
 			Graph.add_cfg_edge g bb_switch bb_case (CFGCondBranch te);
 
+			let load_call_args fdata = List.iter (fun (v,cv,co) ->
+				add_texpr g bb_case (assign_var v (mk_local cv));
+			) fdata.f_call_vars;
+			in
 			let transfer_statements bbf bbt tf = (* TODO : transform `this` *)
 				DynArray.iter ( fun e -> Graph.add_texpr g bb_case e ) bbf.bb_el;
 			in
@@ -2728,229 +2792,233 @@ module TCE = struct
 				(* all incoming edges of bfend need to be redirected to the end of the main function or
 				* to the loop header *)
 				let blocks = List.map (fun ce -> ce.cfg_from) bbfend.bb_incoming in
-				do_p_s_id (String.concat "," (List.map (fun b -> string_of_int b.bb_id) blocks )) 8;
-				List.iter ( fun bb -> try
-					do_p_s_id "rewriting " bb.bb_id;
-					let (bb_func,cidx,(fid,args)) = PMap.find bb.bb_id rec_map in
-					(* got a recursive call here - rewrite it *)
-					(* 1. remove call *)
-					DynArray.delete bb.bb_el cidx;
+				dopsid (String.concat "," (List.map (fun b -> string_of_int b.bb_id) blocks )) 8;
+				List.iter ( fun bb ->
 
-					(* get the tf.tf_args from the function we're calling *)
-					let tf_callee = get_tfunc_by_fid fid in
+					(* if bb.bb_id is in recursive_calls we have to rewrite the call,
+					 * if not we contiue below in Not_found *)
 
-					List.iter ( fun ((v,co),evalue) ->
-						if (match evalue.eexpr with (* avoid self-assignment *)
-							| TLocal(vvalue) ->
-								not ((original_var_id mctx v) = (original_var_id mctx vvalue))
-							| _ -> true
+					try let calldata = PMap.find bb.bb_id mctx.recursive_calls in
+						let (bb,call_idx,fdata_callee,args,othis) = calldata in
+						(* got a recursive call here - rewrite it *)
+						(* 1. remove call *)
+						DynArray.delete bb.bb_el call_idx;
+						List.iter (fun ((v,cv,co),evalue) ->
+							let e = assign_var cv evalue in
+							add_texpr g bb e;
+						) (List.combine fdata_callee.f_call_vars args);
 
-						) then begin
-							let e = assign_var v evalue in
-							DynArray.add bb.bb_el e;
-						end
+						let e = assign_var tce_loop_var (mk_int fdata_callee.f_index) in
+						add_texpr g bb e;
 
-					) (List.combine tf_callee.tf_args args); (* TODO: default arguments *)
-
-					let e = assign_var tce_loop_var (mk_int fid) in
-					DynArray.add bb.bb_el e;
-
-					(match bb.bb_outgoing with
-						| [{cfg_kind=kind}] ->
-							bb.bb_outgoing <-
-								[{cfg_from=bb;cfg_to=bb_loophead;cfg_kind=kind;cfg_flags=[]}];
-						| _ -> assert false ) (* assumption there can be just one is wrong :/ *)
+						(match bb.bb_outgoing with
+							| [{cfg_kind=kind}] ->
+								bb.bb_outgoing <-
+									[{cfg_from=bb;cfg_to=bb_loophead;cfg_kind=kind;cfg_flags=[]}];
+							| _ -> assert false ) (* assumption there can be just one is wrong :/ *)
 
 					with Not_found -> begin (* no recursive call here, only adjust the edges *)
 						let outgoing = List.map ( fun ce ->
-							do_p_s_id "rewriting outgoing" bb.bb_id;
+							dopsid "rewriting outgoing" bb.bb_id;
 							if ce.cfg_to.bb_id = bbfend.bb_id && ce.cfg_to.bb_id != g.g_exit.bb_id then
 									{ ce with cfg_to = g.g_exit }
 							else
 									ce
 						) bb.bb_outgoing in
-						do_p_s_id "rewritten outgoing" bb.bb_id;
+						dopsid "rewritten outgoing" bb.bb_id;
 						bb.bb_outgoing <- outgoing;
-						do_p_s_id "assigned it" bb.bb_id;
+						dopsid "assigned it" bb.bb_id;
 						end
 						(* syntax edge should be OK here *)
-				) blocks;
-		in
-		let declare_args bbf bbt tf = List.iter ( fun (v,oc) ->
-				let value = Option.map ( fun c -> mk (TConst c) v.v_type null_pos ) oc in
-				define_var bb_setup v value;
-			) tf.tf_args; (* declare them outside the loop *)
-		in
+					) blocks;
+				in
+			let declare_args bbf bbt tf = List.iter ( fun (v,oc) ->
+					let value = Option.map ( fun c -> mk (TConst c) v.v_type null_pos ) oc in
 
-		let (bbf,bbfend,tf,decl) = (match f with
-			| FnLocal2(_,_,bbf,bbfend) ->
-				bbf,bbfend,snd (get_tfunc bbf.bb_id),true
-			| FnStatic(c,cf,bb_id)   (* for now *)
-			| FnInstance(c,cf,bb_id) ->
-				let bbf,tf = (get_tfunc bb_id) in
-				bbf,g.g_exit,tf,false
-			| _ -> assert false
-		) in
-		transfer_statements bbf bbfend tf;
-		transfer_edges bbf bbfend tf;
-		if decl then declare_args bbf bbfend tf;
-		rewrite_func_end_blocks bbf bbfend tf;
-		bb_case.bb_closed <- true;
-		bb_case,te
-	)) (IntMap.bindings mctx.fdata)  in
+					define_var bb_setup v value;
+				) tf.tf_args; (* declare them outside the loop *)
+			in
+
+			let (bbf,bbfend,tf,decl) =  (fdata.f_bb_begin,fdata.f_bb_end,fdata.f_tf,false) in
+
+
+			load_call_args fdata;
+			transfer_statements bbf bbfend tf;
+			transfer_edges bbf bbfend tf;
+			if decl then declare_args bbf bbfend tf;
+			rewrite_func_end_blocks bbf bbfend tf;
+			bb_case.bb_closed <- true;
+			(bb_case,te) :: acc
+		)) mctx.funcs_by_idx [] in
 
 		rewrite_dom_edges ();
 
-		let switchcases = List.map (fun (bb_case,te) -> [te],bb_case ) bb_cases in
+		let switchcases = List.map (fun (bb_case,te) -> [te],bb_case ) (List.rev bb_cases) in
 		Graph.set_syntax_edge g bb_switch (SESwitch(switchcases,None,g.g_unreachable));
 		close_blocks [bb_setup;bb_while;bb_loophead;bb_switch];
 
 
+		(* clean up - turn all captured var definitions into assignments
+		 * remove all eliminated functions *)
+		let enull = mk(TConst(TNull)) tvoid null_pos in
+		iter_dom_tree g (fun bb ->
+			dynarray_map (fun e -> (match e.eexpr with
+				| TVar(v,_)
+				| TBinop(OpAssign,{eexpr=TLocal v},_) ->
+						let oid = (original_var_id mctx v) in
+						if Option.is_some (find_func_by_vid mctx oid) then enull else e
+				| _ -> e
+			) ) bb.bb_el;
+		);
+
+		iter_dom_tree g (fun bb ->
+			(* obviously exclude bb_setup here *)
+			if bb.bb_id = bb_setup.bb_id then () else
+			dynarray_map (fun e -> (match e.eexpr with
+				| TVar(v,eo) ->
+					let oid = (original_var_id mctx v) in
+					if (PMap.exists oid mctx.captured_vars) then
+						Option.map_default ( fun evalue -> assign_var v evalue) enull eo
+					else
+						e
+				| TBinop(OpAssign,{eexpr=TLocal v},_) ->
+						let oid = (original_var_id mctx v) in
+						if Option.is_some (find_func_by_vid mctx oid) then enull else e
+				| _ -> e
+			) ) bb.bb_el;
+		);
+
 		()
 
 
-	let create_blocks mctx  = ()
-
-
 	let field_id c cf = Hashtbl.hash (c.cl_path,cf.cf_name)
-
-	let get_f_id mctx f = begin
-		let m = mctx.funcs in (match f with
-		| FnLocal v ->
-			(try Some (PMap.find (original_var_id mctx v) m) with Not_found -> None)
-		| FnStatic(c,cf,_)
-		| FnInstance(c,cf,_) ->
-			let fid = field_id c cf in
-			(try Some (PMap.find fid m) with Not_found -> None)
-		| FnLocal2(_,_,_,_) ->
-			assert false)
-	end
-
-	let is_call_to cf pos = cf.pfile = pos.pfile && cf.pmin = pos.pmin && cf.pmax = pos.pmax
-
-	(* let pspf = *)
-
-	(* in case of success, we return a Some(function id , call arguments) tuple here
-	* to avoid to match the expression again *)
-
-	let is_call_to_tce_func mctx e =
-		let p_res res = if debug then print_endline (Printf.sprintf "is call check: %s %B " (s_with_id e) res)  in
-		let find id args = try Some((PMap.find id mctx.funcs),args) with Not_found -> None in
+	let is_tce_call mctx e =
 		(match e.eexpr with
 		| TCall({eexpr=TLocal v},args) ->
-				find  (original_var_id mctx v) args
-		| TCall({eexpr= TField(_ , (FInstance(c,_,cf) | FStatic(c,cf) ) )},args) ->
-				find (field_id c cf) args
+				Option.map (fun fdata -> fdata,args,None ) (find_func_by_vid mctx (original_var_id mctx v))
+		| TCall({eexpr= TField(ethis, FInstance(c,_,cf))},args) ->
+				Option.map (fun fdata -> fdata,args, (Some ethis) ) (find_func_by_field mctx c cf)
+		| TCall({eexpr= TField(_ , ( FStatic(c,cf)) )},args ) ->
+				(*mctx.actx.com.warning (" recursive call " ^ (s_expr_pretty e)) e.epos;*)
+				Option.map (fun fdata -> fdata,args,None ) (find_func_by_field mctx c cf)
 		| _ -> None )
 
-
-	let has_call_to mctx e =
+	let has_tce_call mctx e =
 		let rec loop e = (match e.eexpr with
-			| TCall(_,_) -> is_call_to_tce_func mctx e
+			| TCall(_,_) -> is_tce_call mctx e
 			| TVar(_, Some te)
 			| TBinop(OpAssign,_,te)
 			| TReturn(Some te) -> loop te
 			| _ -> None)
 		in loop e
 
-	let add_local_tce_func mctx bb idx e = (match e.eexpr with
+	let add_local_func mctx bb idx e = (match e.eexpr with
 		| TVar ( v,
 			Some({eexpr=TCall({eexpr = TConst (TString "fun")},[{eexpr = TConst (TInt i32)}])}))
 		| TBinop (OpAssign,(
 			{eexpr=TLocal v}),
 			{eexpr=TCall({eexpr = TConst (TString "fun")},[{eexpr = TConst (TInt i32)}])}) ->
+			let oid = (original_var_id mctx v) in
+			if true then print_endline (Printf.sprintf "### adding local function %d %s " oid  (v.v_name));
 
-			if debug then print_endline ("adding local function " ^ (v.v_name));
 			let bb_func_id = (Int32.to_int i32) in
-			let (bb_fdecl,bb_fstart,bb_fend) = get_blocks_relevant_for_func_declaration mctx bb bb_func_id in
-			p_s_id ("adding function " ^ v.v_name) bb_func_id;
-			(* match DynArray.to_list bb_fdecl.bb_el with
-					| [{eexpr=TVar(vdecl_1,_)}] ->  ()
-					| _ -> assert false
-			); *)
-			(* find the assignment of the function variable TODO TODO TODO *)
+			add_func_by_vid mctx (original_var_id mctx v) bb_func_id;
 			(match (DynArray.get bb.bb_el (idx+1)).eexpr with
 				| TVar(vleft,Some({eexpr=TLocal v2})) when (v2.v_id = v.v_id) ->
-					p_s_id "oid lhs : " (original_var_id mctx vleft);
-					p_s_id "oid rhs : " (original_var_id mctx v2);
-					set_f_id mctx (FnLocal2(vleft,v2,bb_fstart,bb_fend));
-				| TConst(TNull) -> (* assumed to be removed by local DCE *)
-					set_f_id mctx (FnLocal2(v,v,bb_fstart,bb_fend)); (* uhm, figure this out *)
-				| _ ->
-					set_f_id mctx (FnLocal2(v,v,bb_fstart,bb_fend));
-			);
-			iter_dom_sub_tree bb_fstart bb p_tree_ids;
-			if debug then  print_endline ("done adding local function" ^ (v.v_name));
-			true
-		| _ -> false
-	)
+					let oid = (original_var_id mctx vleft) in
+					print_endline (Printf.sprintf "### + %d %s " oid  (v.v_name));
+					add_func_by_vid mctx (original_var_id mctx vleft) bb_func_id;
+				| _ -> ());
 
-	let invalid_calls ctx l da =
-		List.iter (fun idx ->
-			let e = DynArray.get da idx in
-			(ctx.com.warning "call not in tail position" e.epos )) (List.rev l)
+		| _ -> ())
+	let warn_invalid_calls ctx l  =
+		List.iter (fun (bb,idx,_,_,_) ->
+			let e = DynArray.get bb.bb_el idx in
+			(ctx.com.warning "call not in tail position" e.epos )
+		) (List.rev l)
+
 
 	let edge_to_exit bb = (match bb.bb_outgoing with
 		| [{cfg_to={bb_kind = BKFunctionEnd }}] -> true
 		| _ -> false)
 
-	let remove_function_and_edges bb idxs = begin
-		let enull = mk (TConst(TNull)) t_dynamic null_pos in
-		List.iter (fun idx -> DynArray.set bb.bb_el idx enull) idxs;
-		bb.bb_outgoing <-
-			List.filter ( fun ce -> match ce.cfg_kind with CFGFunction -> false | _ -> true ) bb.bb_outgoing;
-	end
+	let fold_recursive_calls mctx bb_entry_func f acc =
+		let g = mctx.actx.graph in
+		fold_dom_tree bb_entry_func g.g_exit (fun acc bb ->
+			let len = DynArray.length bb.bb_el in
+			let rec loop idx acc =
+				if idx = len then
+					acc
+				else begin
+					let te = DynArray.get bb.bb_el idx in
+					add_local_func mctx bb idx te;
+					let callo = (has_tce_call mctx te) in
+					let acc = Option.map_default
+						(fun (fdata,args,othis) -> (bb,idx,fdata,args,othis) :: acc ) acc callo
+					in loop (idx+1) acc
+				end
+			in f bb (loop 0 []) acc
+		) acc
+
 
 	let rec apply ctx c cf =
-		let mctx = { funcs = PMap.empty; cid = -1; actx = ctx; fdata = IntMap.empty } in
+		let mctx = {
+			funcs_by_vid = PMap.empty;
+			funcs_by_idx = PMap.empty;
+			funcs_by_bbid= PMap.empty;
+			funcs_by_field = PMap.empty;
+			captured_vars =  PMap.empty;
+			recursive_calls = PMap.empty;
+			actx = ctx;
+		} in
+
 		let g = ctx.graph in
-		let bb_entry_func = (match mctx.actx.graph.g_root.bb_outgoing with
+
+		let bb_entry_func = (match g.g_root.bb_outgoing with
 			| [{cfg_to={bb_kind=BKFunctionBegin} as bb_entry_func}] -> bb_entry_func
 			| _ -> assert false (* really?? *)
 		) in
 
-		if PMap.exists cf.cf_name c.cl_fields
-			then set_f_id mctx (FnInstance(c,cf,bb_entry_func.bb_id))
-			else set_f_id mctx (FnStatic(c,cf,bb_entry_func.bb_id));
+		mk_func_maps mctx;
 
-		let block_results = begin fold_dom_tree [] bb_entry_func g.g_exit (fun acc bb ->
-			let len = DynArray.length bb.bb_el in
-			let rec loop idx acc =
-				if idx = len then acc else
-				let te = DynArray.get bb.bb_el idx in
-				add_local_tce_func mctx bb idx te;
-				let _ = if debug then print_endline ((string_of_int idx) ^" " ^ (s_with_id te))  in
-				let acc = (match has_call_to mctx te with
-					| Some fid -> (idx,fid) :: acc
-					| _ -> acc)
-				in
-				loop (idx+1) acc
-			in
-			let rec_calls = loop 0 [] in
-			let err = RError "some calls were not in tail position - see above warnings for more." in
-			let res = (match rec_calls with
-				| [cidx,fid] -> if (cidx = len - 1 && edge_to_exit bb) then ( RValue( Some(cidx,fid)))
-					else begin
-					invalid_calls ctx [cidx] bb.bb_el;
-					err end
-				| [] -> RValue None
-				| (cidx,fid) :: tail ->  begin
-					let l = if (cidx = len - 1 && edge_to_exit bb) then tail else rec_calls in
-					invalid_calls ctx (List.map fst l) bb.bb_el;
-					err end
-			)
-			in (bb,res) :: acc
-		) end  in
+		add_func_by_field mctx c cf bb_entry_func.bb_id true;
 
-		List.iter ( fun (_,res) -> match res with | RError e ->  error e cf.cf_pos | _ -> () ) block_results;
+		let fdata_entry = Option.get (find_func_by_field mctx c cf) in
 
-		let rec_map = List.fold_left ( fun m (bb,res) -> match res with RValue(Some(cidx,fid)) ->
-				PMap.add bb.bb_id (bb,cidx,fid) m | _ -> m) PMap.empty block_results in
-		transform mctx bb_entry_func rec_map;
+		mctx.captured_vars <- DynArray.fold_left ( fun acc vi ->
+			(* exclude args of the entry function *)
+			if vi.vi_origin.v_capture && not (PMap.exists vi.vi_origin.v_id fdata_entry.f_call_var_m) then
+				PMap.add vi.vi_origin.v_id vi.vi_origin acc
+			else
+				acc
+		) PMap.empty g.g_var_infos;
 
-		(* print_endline (" bb id: " ^ (string_of_int bb.bb_id) ^" " ^(BasicBlock.s_block_kind bb.bb_kind) ^ (String.concat "," (List.map string_of_int scalls )) );
-		List.iter (fun e -> print_endline (s_cfg_edge e) ) bb.bb_outgoing;
-		);  *)
+		(* for now (and later in strict mode) we handle any calls not in tail position as errors  *)
+		let recursive_call_results =
+			fold_recursive_calls mctx bb_entry_func ( fun bb rec_calls acc ->
+				let len = DynArray.length bb.bb_el in
+				let is_valid_tce_call (_,idx,_,_,_) = (idx = len-1) && edge_to_exit bb in
+				let invalid = List.filter (fun c -> not (is_valid_tce_call c)) rec_calls in
+				let res = (match invalid with
+					| [] -> RValue rec_calls
+					| l  -> warn_invalid_calls ctx l;
+							RError "some calls were not in tail position - see above warnings for more."
+				) in res :: acc
+			) []
+		in
+		let recursive_calls = List.fold_left ( fun acc res -> (match res with
+			| RError e -> error e cf.cf_pos;
+			| RValue [calldata] ->  calldata :: acc
+			| RValue [] -> acc
+			| _ -> assert false )
+		) [] recursive_call_results in
+
+		mctx.recursive_calls <- List.fold_left ( fun m cd ->
+			let (bb,_,_,_,_) = cd in PMap.add bb.bb_id cd m
+		) PMap.empty recursive_calls;
+
+		transform mctx bb_entry_func;
+
 end
 
 module Debug = struct
