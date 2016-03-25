@@ -852,12 +852,18 @@ module Graph = struct
 			bb.bb_closed <- true
 		end
 
-	let iter_dom_tree g f =
+	let iter_dom_tree_from g bb f =
 		let rec loop bb =
 			f bb;
 			List.iter loop bb.bb_dominated
 		in
-		loop g.g_root
+		loop bb
+
+	let iter_dom_tree g f =
+		iter_dom_tree_from g g.g_root f
+
+	let iter_edges_from g bb f =
+		iter_dom_tree_from g bb (fun bb -> List.iter f bb.bb_outgoing)
 
 	let iter_edges g f =
 		iter_dom_tree g (fun bb -> List.iter f bb.bb_outgoing)
@@ -929,9 +935,14 @@ module Graph = struct
 			loop edge.cfg_from
 		)
 
+	let check_integrity g =
+		iter_edges g (fun edge ->
+			if not (List.memq edge edge.cfg_to.bb_incoming) then
+				prerr_endline (Printf.sprintf "Outgoing edge %i -> %i has no matching incoming edge" edge.cfg_from.bb_id edge.cfg_to.bb_id)
+		)
+
 	let finalize g bb_exit =
-		g.g_exit <- bb_exit;
-		calculate_df g;
+		g.g_exit <- bb_exit
 end
 
 type analyzer_context = {
@@ -1366,7 +1377,7 @@ module TexprTransformer = struct
 					| [bb_break] -> bb_break
 					| _ -> bb_loop_body (* TODO: this is not accurate for while(true) loops *)
 				in
-				let bb_next = create_node BKNormal dom bb.bb_type bb.bb_pos in
+				let bb_next = if dom == g.g_unreachable then g.g_unreachable else create_node BKNormal dom bb.bb_type bb.bb_pos in
 				List.iter (fun bb -> add_cfg_edge g bb bb_next CFGGoto) bb_breaks;
 				set_syntax_edge g bb_loop_pre (SEWhile(bb_loop_body,bb_next));
 				close_node g bb_loop_pre;
@@ -1808,6 +1819,7 @@ module Ssa = struct
 		List.iter (rename_in_block ctx) bb.bb_dominated
 
 	let apply ctx =
+		Graph.calculate_df ctx.graph;
 		insert_phi ctx;
 		rename_in_block ctx ctx.graph.g_root
 end
