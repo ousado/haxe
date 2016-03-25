@@ -2838,11 +2838,11 @@ module Config = struct
 			let bb_fake = BasicBlock._create (alloc_id()) BKUnreachable [] tvoid null_pos in
 			let bb_setup = (* scope 0 declarations, etc *)
 				(*we first leave the node "unconnected" and set the dom later *)
-				create_node g BKNormal [0] bb_fake tvoid null_pos in
+				create_node g BKNormal [0] tvoid null_pos in
 
-			let bb_while = Graph.create_node g BKNormal [0] bb_setup tvoid null_pos in
-			let bb_loophead = Graph.create_node g BKLoopHead [0] bb_while tvoid null_pos in
-			let bb_switch = Graph.create_node g BKNormal [0] bb_loophead bb_dom.bb_type null_pos in
+			let bb_while = Graph.create_node g BKNormal [0] tvoid null_pos in
+			let bb_loophead = Graph.create_node g BKLoopHead [0]  tvoid null_pos in
+			let bb_switch = Graph.create_node g BKNormal [0] bb_dom.bb_type null_pos in
 
 			Graph.add_cfg_edge g bb_setup bb_while CFGGoto;
 			Graph.add_cfg_edge g bb_while bb_loophead CFGGoto;
@@ -2922,7 +2922,7 @@ module Config = struct
 
 			let bb_cases = PMap.foldi ( fun idx fdata acc  -> ( (* each case corresponds to one of the functions tce is being applied to *)
 
-				let bb_case = Graph.create_node g BKConditional [idx;0] bb_switch bb_dom.bb_type null_pos in
+				let bb_case = Graph.create_node g BKConditional [idx;0] bb_dom.bb_type null_pos in
 				let te = mk (TConst (TInt (Int32.of_int idx))) t_dynamic null_pos in
 
 				Graph.add_cfg_edge g bb_switch bb_case (CFGCondBranch te);
