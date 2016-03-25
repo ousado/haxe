@@ -3435,12 +3435,12 @@ module Run = struct
 	let run_on_expr com config c cf e =
 		let ctx = there com config e in
 		if config.optimize && not ctx.has_unbound then begin
+			if config.tail_call_elimination then with_timer "analyzer-tail-call-elimination" (fun () -> TCE.apply ctx c cf);
 			with_timer "analyzer-ssa-apply" (fun () -> Ssa.apply ctx);
 			if config.const_propagation then with_timer "analyzer-const-propagation" (fun () -> ConstPropagation.apply ctx);
 			if config.copy_propagation then with_timer "analyzer-copy-propagation" (fun () -> CopyPropagation.apply ctx);
 			if config.code_motion then with_timer "analyzer-code-motion" (fun () -> CodeMotion.apply ctx);
 			with_timer "analyzer-local-dce" (fun () -> LocalDce.apply ctx);
-			if config.tail_call_elimination then with_timer "analyzer-tail-call-elimination" (fun () -> TCE.apply ctx c cf);
 		end;
 		ctx,back_again ctx
 
