@@ -2747,7 +2747,7 @@ module TCE = struct
 
 	let get_func_end_block bb_begin =  begin match (
 			fold_dom_tree_filter
-			(fun bb -> match bb.bb_kind with BKFunctionBegin -> false | _ -> true )
+			(fun bb -> match bb.bb_kind with BKFunctionBegin _ -> false | _ -> true )
 			(fun acc bb -> match bb.bb_kind with BKFunctionEnd -> bb :: acc | _ -> acc)
 			[]
 			bb_begin
@@ -2862,21 +2862,21 @@ module TCE = struct
 		(* let bb_next bb = create_node g BKNormal bb bb.bb_type bb.bb_pos in *)
 
 		(*   structure   *)
-		let bb_fake = BasicBlock._create (alloc_id()) BKUnreachable [] tvoid null_pos in
+		let bb_fake = BasicBlock._create (alloc_id()) BKUnreachable tvoid null_pos in
 		let bb_setup = (* scope 0 declarations, etc *)
 			(*we first leave the node "unconnected" and set the dom later *)
-			create_node g BKNormal [0] tvoid null_pos in
+			create_node g BKNormal tvoid null_pos in
 
-		let bb_while = Graph.create_node g BKNormal [0] tvoid null_pos in
-		let bb_loophead = Graph.create_node g BKLoopHead [0]  tvoid null_pos in
-		let bb_switch = Graph.create_node g BKNormal [0] bb_dom.bb_type null_pos in
+		let bb_while = Graph.create_node g BKNormal tvoid null_pos in
+		let bb_loophead = Graph.create_node g BKLoopHead  tvoid null_pos in
+		let bb_switch = Graph.create_node g BKNormal bb_dom.bb_type null_pos in
 
 		Graph.add_cfg_edge g bb_setup bb_while CFGGoto;
 		Graph.add_cfg_edge g bb_while bb_loophead CFGGoto;
 		Graph.add_cfg_edge g bb_loophead bb_switch CFGGoto;
 
 
-		Graph.set_syntax_edge g bb_while (SEWhile(bb_switch,g.g_unreachable));
+		Graph.set_syntax_edge g bb_while (SEWhile(bb_loophead,bb_switch,g.g_unreachable));
 
 		(* declare/define tmp call vars, captured vars and arguments outside the main loop in bb_setup  *)
 
@@ -2950,7 +2950,7 @@ module TCE = struct
 
 		(* each case corresponds to one of the functions tce is being applied to *)
 		let bb_cases = PMap.foldi ( fun idx fdata acc  -> (
-			let bb_case = Graph.create_node g BKConditional [idx;0] bb_dom.bb_type null_pos in
+			let bb_case = Graph.create_node g BKConditional bb_dom.bb_type null_pos in
 			let te = mk (TConst (TInt (Int32.of_int idx))) t_dynamic null_pos in
 
 			Graph.add_cfg_edge g bb_switch bb_case (CFGCondBranch te);
@@ -3274,7 +3274,7 @@ module TCE = struct
 		let g = ctx.graph in
 
 		let bb_entry_func = (match g.g_root.bb_outgoing with
-			| [{cfg_to={bb_kind=BKFunctionBegin} as bb_entry_func}] -> bb_entry_func
+			| [{cfg_to={bb_kind=BKFunctionBegin _} as bb_entry_func}] -> bb_entry_func
 			| _ -> assert false (* really?? *)
 		) in
 
