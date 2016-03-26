@@ -2883,7 +2883,7 @@ module Config = struct
 					bb_dom.bb_outgoing <- [];                    (* EDGE *)
 					Graph.add_cfg_edge g bb_dom bb_setup CFGGoto;
 
-
+					
 					bb_setup.bb_dominator <- bb_dom;
 					bb_while.bb_dominator <- bb_setup;
 					bb_loophead.bb_dominator <- bb_while;
@@ -2893,6 +2893,7 @@ module Config = struct
 					bb_setup.bb_dominated <- [bb_while];
 					bb_while.bb_dominated <- [bb_loophead];
 					bb_loophead.bb_dominated <- [bb_switch];
+					
 				(* switch dominates all the bb_case nodes *)
 			) in
 
@@ -2905,8 +2906,8 @@ module Config = struct
 			let mk_int i =  (mk (TConst( TInt(Int32.of_int i)))  tint null_pos) in
 			let tce_loop_var =
 					alloc_var "_hx_tce_current_function" tint in
-
 			define_var bb_setup tce_loop_var (Some (mk (TConst( TInt(Int32.of_int fdata_entry.f_index)))  tint null_pos));
+			add_var_def g bb_setup tce_loop_var;
 
 			add_texpr g bb_switch (wrap_meta ":cond-branch" (mk (TLocal(tce_loop_var)) tce_loop_var.v_type null_pos));
 
@@ -2920,8 +2921,8 @@ module Config = struct
 				mk (TBinop(OpAssign,ev,evalue)) v.v_type null_pos
 			in
 
-			let bb_cases = PMap.foldi ( fun idx fdata acc  -> ( (* each case corresponds to one of the functions tce is being applied to *)
-
+			(* each case corresponds to one of the functions tce is being applied to *)
+			let bb_cases = PMap.foldi ( fun idx fdata acc  -> (
 				let bb_case = Graph.create_node g BKConditional [idx;0] bb_dom.bb_type null_pos in
 				let te = mk (TConst (TInt (Int32.of_int idx))) t_dynamic null_pos in
 
@@ -2943,8 +2944,11 @@ module Config = struct
 
 				let transfer_edges bbf bbt tf =
 					let cfges = List.filter filter_func_cfges bbf.bb_outgoing in
+					bbf.bb_outgoing <- [];
 					List.iter ( fun ce ->
-						 Graph.add_cfg_edge g bb_case ce.cfg_to ce.cfg_kind
+						ce.cfg_to.bb_incoming <- List.filter
+							( fun {cfg_from=cfg_from} -> not (cfg_from.bb_id = bbf.bb_id) ) ce.cfg_to.bb_incoming;
+						Graph.add_cfg_edge g bb_case ce.cfg_to ce.cfg_kind;
 					) cfges;
 					Graph.set_syntax_edge g bb_case bbf.bb_syntax_edge
 				in
@@ -2952,15 +2956,13 @@ module Config = struct
 					(* all incoming edges of bfend need to be redirected to the end of the main function or
 					* to the loop header *)
 					let blocks = List.map (fun ce -> ce.cfg_from) bbfend.bb_incoming in
-					dopsid (String.concat "," (List.map (fun b -> string_of_int b.bb_id) blocks )) 8;
+
+					let rcall_blocks = List.filter (fun bb -> PMap.exists bb.bb_id mctx.recursive_calls) blocks in
+					let return_blocks = List.filter (fun bb -> not (PMap.exists bb.bb_id mctx.recursive_calls)) blocks in
+
 					List.iter ( fun bb ->
-
-						(* if bb.bb_id is in recursive_calls we have to rewrite the call,
-						 * if not we contiue below in Not_found *)
-
-						try let calldata = PMap.find bb.bb_id mctx.recursive_calls in
+							let calldata = PMap.find bb.bb_id mctx.recursive_calls in
 							let (bb,call_idx,fdata_callee,args,othis) = calldata in
-							(* got a recursive call here - rewrite it *)
 							(* 1. remove call *)
 							DynArray.delete bb.bb_el call_idx;
 							List.iter (fun ((v,cv,co),evalue) ->
@@ -2973,6 +2975,34 @@ module Config = struct
 							add_texpr g bb e;
 							add_var_def g bb tce_loop_var;
 
+					) rcall_blocks;
+
+					if bbfend.bb_id = g.g_exit.bb_id then () (* don't adjust edges here *)
+					else begin
+						(* disconnect all edges to bbfend *)
+						List.iter ( fun bb ->
+							bb.bb_outgoing <- List.filter ( fun ce -> ce.cfg_to == bbfend ) bb.bb_outgoing;
+						) blocks;
+						bbfend.bb_incoming <- [];
+						bbfend.bb_outgoing <- [];
+						(* set edges to loopheader *)
+						List.iter (fun bb ->
+							add_cfg_edge g bb bb_loophead CFGGoto;
+						) rcall_blocks;
+						(* set edges to g_exit *)
+						List.iter (fun bb ->
+							add_cfg_edge g bb g.g_exit CFGGoto;
+						) return_blocks;
+					end;
+
+					dopsid (String.concat "," (List.map (fun b -> string_of_int b.bb_id) blocks )) 8;
+					(*
+					List.iter ( fun bb ->
+
+						(* if bb.bb_id is in recursive_calls we have to rewrite the call,
+						 * if not we contiue below in Not_found *)
+
+						try 
 							(match bb.bb_outgoing with
 								| [{cfg_kind=kind}] ->
 									bb.bb_outgoing <-
@@ -2980,19 +3010,27 @@ module Config = struct
 								| _ -> assert false ) (* assumption there can be just one is wrong :/ *)
 
 						with Not_found -> begin (* no recursive call here, only adjust the edges *)
-							let outgoing = List.map ( fun ce ->
+
+
+							let outgoing = List.filter ( fun ce ->
 								dopsid "rewriting outgoing" bb.bb_id;
-								if ce.cfg_to.bb_id = bbfend.bb_id && ce.cfg_to.bb_id != g.g_exit.bb_id then
-										{ ce with cfg_to = g.g_exit }
+								if ce.cfg_to.bb_id = bbfend.bb_id && ce.cfg_to.bb_id != g.g_exit.bb_id then begin
+									let incoming = List.filter
+										(fun cein ->  if cein.ce_from.bb_id = bb.bb_id then false else true) ce.cfg_to.bb_incoming in
+									ce.cfg_to.bb_incoming <- incoming;
+									false
+								end
 								else
-										ce
+									true
 							) bb.bb_outgoing in
 							dopsid "rewritten outgoing" bb.bb_id;
+							List.iter (fun ce -> )
 							bb.bb_outgoing <- outgoing;
+
 							dopsid "assigned it" bb.bb_id;
 							end
 							(* syntax edge should be OK here *)
-						) blocks;
+						) blocks; *)
 					in
 				let declare_args bbf bbt tf = List.iter ( fun (v,oc) ->
 						let value = Option.map ( fun c -> mk (TConst c) v.v_type null_pos ) oc in
@@ -3005,6 +3043,7 @@ module Config = struct
 
 				let rewrite_dominators = (fun () ->
 					bb_case.bb_dominator <- bb_switch;
+					bb_switch.bb_dominated <- bb_case :: bb_switch.bb_dominated;
 					dopsid "replace" bb_case.bb_id;
 					bb_case.bb_dominated <- replace_dominator mctx fdata.f_bb_begin bb_case fdata.f_bb_end;
 					dopsid "replace" bb_case.bb_id;
@@ -3056,10 +3095,17 @@ module Config = struct
 
 			p_dom_tree nmap;
 
+			(*rewrite_dom_edges ();*)
+			
 			(*the order of the following two is important *)
 			List.iter ( fun (_,_,rewrite_dominators) -> rewrite_dominators ()) bb_cases_data;
 			rewrite_dom_edges ();
 			bb_switch.bb_dominated <- bb_cases;
+			
+
+			check_integrity g;
+			(* calculate_immediate_dominators g; *)
+
 
 			p_dom_tree nmap;
 
@@ -3105,6 +3151,15 @@ module Config = struct
 				) ) bb.bb_el;
 			);
 			dopsid "cleanup" 2;
+
+			iter_dom_tree g (fun bb ->
+				DynArray.iter (fun e -> (match e.eexpr with
+				| TVar(v,_) ->
+					add_var_def g bb v
+				| TBinop(_,{eexpr=TLocal v},_) ->
+					add_var_def g bb v
+				| _ -> ()
+			) ) bb.bb_el );
 			()
 
 
