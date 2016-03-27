@@ -2887,14 +2887,15 @@ module TCE = struct
 
 		PMap.iter ( fun idx f ->
 			List.iter ( fun (v,cv,co) ->
-				let value = if f.f_is_entry then
+				(* let value = if f.f_is_entry then
 					Some(mk_local v)
 				else begin
 					v.v_name <- (Printf.sprintf "_arg%d_%s" idx v.v_name); (* unique name for non-entry function args *)
 					define_var bb_setup v None;
 					None
-				end in
-				define_var bb_setup cv value;
+				end in *)
+				if not f.f_is_entry then define_var bb_setup v None;
+				(* define_var bb_setup cv value; *)
 			) f.f_call_vars;
 		) mctx.funcs_by_idx;
 
@@ -2968,7 +2969,8 @@ module TCE = struct
 			set_syntax_edge g bb_case_init (SEMerge bb_case); 
 
 			let load_call_args fdata = List.iter (fun (v,cv,co) ->
-				add_texpr g bb_case_init (assign_var v (mk_local cv));
+				()
+				(* add_texpr g bb_case_init (assign_var v (mk_local cv)); *)
 			) fdata.f_call_vars;
 			in
 			let transfer_statements bbf bbt tf = (* TODO : transform `this` *)
@@ -3018,9 +3020,12 @@ module TCE = struct
 
 						DynArray.delete bb.bb_el call_idx;
 						List.iter (fun ((v,cv,co),evalue) ->
-							let e = assign_var cv evalue in
+							let cv = alloc_var cv.v_name cv.v_type in
+							define_var bb cv (Some evalue);
+							let cv_value = mk_local cv in
+							let e = assign_var v cv_value in
 							add_texpr g bb e;
-							add_var_def g bb cv;
+							add_var_def g bb v;
 						) (List.combine fdata_callee.f_call_vars args);
 
 						let e = assign_var tce_loop_var (mk_int fdata_callee.f_index) in
