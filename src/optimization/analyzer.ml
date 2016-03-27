@@ -2871,6 +2871,26 @@ module TCE = struct
 
 		let enull = mk(TConst(TNull)) tvoid null_pos in
 
+		(* handle `this` - get type, rewrite expressions, declare *)
+		let thisdata = begin
+			let vthis = alloc_var ( Printf.sprintf  "_tce_this%d" fdata_entry.f_index ) tvoid in
+			(match fdata_entry.f_kind with
+				| FKInstance _ ->
+					let rec loop e = (match e.eexpr with
+						| TConst(TThis) ->
+							vthis.v_type <- e.etype;
+							mk_local vthis
+						| _ -> Type.map_expr loop e
+					) in
+					iter_dom_tree g (fun bb ->
+						dynarray_map loop bb.bb_el
+					);
+					Some ((mk_local vthis),vthis,loop)
+				| _ -> None
+			)
+			end
+		in
+
 		(*   structure   *)
 		let bb_setup = create_node g BKNormal tvoid null_pos in
 		let bb_while = create_node g BKNormal tvoid null_pos in
@@ -2883,7 +2903,12 @@ module TCE = struct
 
 		set_syntax_edge g bb_while (SEWhile(bb_loophead,bb_switch,g.g_unreachable));
 
-		(* declare/define tmp call vars, captured vars and arguments outside the main loop in bb_setup  *)
+		(* declare/define tmp call vars, captured vars and arguments, and maybe `this` outside the main loop in bb_setup  *)
+		(match thisdata with
+			| Some (ethis,vthis,_) ->
+					define_var bb_setup vthis (Some(mk (TConst(TThis)) vthis.v_type null_pos ));
+			|_ ->()
+		);
 
 		PMap.iter ( fun idx f ->
 			List.iter ( fun (v,cv,co) ->
@@ -3033,7 +3058,11 @@ module TCE = struct
 							add_texpr g bb e;
 							add_var_def g bb v;
 						) (List.combine calldata_args cvs);
-
+						(match (othis,thisdata) with
+							| Some(evalue),Some(ethis,vthis,f) ->
+								add_texpr g bb (assign_var vthis (f evalue))
+							| _ -> ()
+						);
 						let e = assign_var tce_loop_var (mk_int fdata_callee.f_index) in
 						add_texpr g bb e;
 						add_var_def g bb tce_loop_var;
