@@ -3019,14 +3019,20 @@ module TCE = struct
 							dopsid (s_expr_pretty e) call_idx;
 
 						DynArray.delete bb.bb_el call_idx;
-						List.iter (fun ((v,cv,co),evalue) ->
+						let calldata_args = (List.combine fdata_callee.f_call_vars args) in
+						let cvs = List.map (fun ((v,cv,co),evalue) ->
 							let cv = alloc_var cv.v_name cv.v_type in
 							define_var bb cv (Some evalue);
+							cv;
+						) calldata_args in
+						List.iter (fun (((v,_,co),evalue),cv) ->
+							(* let cv = alloc_var cv.v_name cv.v_type in
+							define_var bb cv (Some evalue); *)
 							let cv_value = mk_local cv in
 							let e = assign_var v cv_value in
 							add_texpr g bb e;
 							add_var_def g bb v;
-						) (List.combine fdata_callee.f_call_vars args);
+						) (List.combine calldata_args cvs);
 
 						let e = assign_var tce_loop_var (mk_int fdata_callee.f_index) in
 						add_texpr g bb e;
