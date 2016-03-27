@@ -1053,7 +1053,7 @@ module Graph = struct
 		) nodes
 
 	let infer_var_writes g =
-		DynArray.clear g.g_var_infos;
+		(* DynArray.clear g.g_var_infos; *)
 		iter_dom_tree g (fun bb ->
 			bb.bb_var_writes <- [];
 			begin match bb.bb_kind with
@@ -2694,7 +2694,15 @@ module TCE = struct
 	}
 
 	let mk_fdata f_index f_tf f_call_var_m f_call_vars f_bb_begin f_bb_end f_bb_decl f_kind =
-		{ f_index; f_tf; f_call_var_m; f_call_vars; f_bb_begin; f_bb_end; f_bb_decl; f_is_entry=false; f_kind }
+		{ f_index=f_index;
+		f_tf=f_tf;
+		f_call_var_m=f_call_var_m;
+		f_call_vars=f_call_vars;
+		f_bb_begin=f_bb_begin;
+		f_bb_end=f_bb_end;
+		f_bb_decl=f_bb_decl;
+		f_is_entry=false;
+		f_kind=f_kind }
 
 	type mctx = {
 		mutable funcs_by_vid : (int, fdata) PMap.t;
@@ -2951,20 +2959,27 @@ module TCE = struct
 
 		(* each case corresponds to one of the functions tce is being applied to *)
 		let bb_cases = PMap.foldi ( fun idx fdata acc  -> (
-			let bb_case = create_node g BKConditional bb_dom.bb_type null_pos in
-			(* let bb_case_init = create_node g BKConditional tvoid null_pos in *)
+			let bb_case = create_node g BKNormal bb_dom.bb_type null_pos in
+			let bb_case_init = create_node g BKConditional tvoid null_pos in
 			let te = mk (TConst (TInt (Int32.of_int idx))) t_dynamic null_pos in
 
-			add_cfg_edge g bb_switch bb_case (CFGCondBranch te);
+			add_cfg_edge g bb_switch bb_case_init (CFGCondBranch te);
+			add_cfg_edge g bb_case_init bb_case CFGGoto;
 
 			let load_call_args fdata = List.iter (fun (v,cv,co) ->
-				add_texpr g bb_case (assign_var v (mk_local cv));
+				add_texpr g bb_case_init (assign_var v (mk_local cv));
 			) fdata.f_call_vars;
 			in
 			let transfer_statements bbf bbt tf = (* TODO : transform `this` *)
+				if PMap.exists bbf.bb_id  mctx.recursive_calls then begin
+					let m = mctx.recursive_calls in (* a bit of a hack here, TODO *)
+					let (bb,call_idx,fdata_callee,args,othis) = (PMap.find bbf.bb_id m) in
+					mctx.recursive_calls <- PMap.add bb_case.bb_id (bb_case,call_idx,fdata_callee,args,othis) m;
+				end else ();
 				(* when we're transferring TVars, do we have to declare_var them in the new block?*)
 				DynArray.iteri ( fun idx e ->
 					DynArray.set bbf.bb_el idx enull;
+					print_endline (s_expr_pretty e);
 					add_texpr g bb_case e
 				) bbf.bb_el;
 			in
@@ -3067,16 +3082,21 @@ module TCE = struct
 
 
 		let p_dom_tree nmap =
+			let pblock bb = DynArray.iteri ( fun idx e ->
+				print_endline (Printf.sprintf "    %d::%s " idx (s_expr_pretty e ))
+			) bb.bb_el in
 			let nodes_map = fold_dom_tree g.g_root g.g_exit (fun m bb ->
 				let _ = try let n = PMap.find bb.bb_id nmap in
-						dopsid ("checking " ^ n) bb.bb_id
+						dopsid ("checking " ^ n) bb.bb_id;
+						pblock bb;
 					with Not_found ->
 						dopsid (
 							Printf.sprintf "checking unknown with dom %d  and kind %s \n  [%s] "
 							bb.bb_dominator.bb_id
 							(BasicBlock.s_block_kind bb.bb_kind)
-							(String.concat "," (List.map (fun bb -> (string_of_int bb.bb_id)) bb.bb_dominated ))
-						) bb.bb_id
+							(String.concat "," (List.map (fun bb -> (string_of_int bb.bb_id)) bb.bb_dominated ));
+						) bb.bb_id;
+						pblock bb;
 				in
 				if PMap.exists bb.bb_id m then begin
 					try let n = PMap.find bb.bb_id nmap in
@@ -3127,6 +3147,7 @@ module TCE = struct
 
 		(* clean up - turn all captured var definitions into assignments
 		 * remove all eliminated functions *)
+		if true then begin
 		dopsid "cleanup" 0;
 		iter_dom_tree g (fun bb ->
 			dopsid "cleanup node" bb.bb_id;
@@ -3156,6 +3177,8 @@ module TCE = struct
 				| _ -> e
 			) ) bb.bb_el;
 		);
+		p_dom_tree nmap;
+		end;
 		dopsid "cleanup" 2;
 		()
 

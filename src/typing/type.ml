@@ -1044,7 +1044,7 @@ let rec s_expr_pretty tabs s_type e =
 	let slist f l = String.concat "," (List.map f l) in
 	match e.eexpr with
 	| TConst c -> s_const c
-	| TLocal v -> v.v_name
+	| TLocal v -> sprintf "%s(%d)" v.v_name v.v_id
 	| TArray (e1,e2) -> sprintf "%s[%s]" (loop e1) (loop e2)
 	| TBinop (op,e1,e2) -> sprintf "%s %s %s" (loop e1) (s_binop op) (loop e2)
 	| TEnumParameter (e1,_,i) -> sprintf "%s[%i]" (loop e1) i
@@ -1064,7 +1064,7 @@ let rec s_expr_pretty tabs s_type e =
 		let args = slist (fun (v,o) -> sprintf "%s:%s%s" v.v_name (s_type v.v_type) (match o with None -> "" | Some c -> " = " ^ s_const c)) f.tf_args in
 		sprintf "function(%s) = %s" args (loop f.tf_expr)
 	| TVar (v,eo) ->
-		sprintf "var %s" (sprintf "%s%s" v.v_name (match eo with None -> "" | Some e -> " = " ^ loop e))
+		sprintf "var (%d)%s" v.v_id (sprintf "%s%s" v.v_name (match eo with None -> "" | Some e -> " = " ^ loop e))
 	| TBlock el ->
 		let ntabs = tabs ^ "\t" in
 		let s = sprintf "{\n%s" (String.concat "" (List.map (fun e -> sprintf "%s%s;\n" ntabs (s_expr_pretty ntabs s_type e)) el)) in
