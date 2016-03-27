@@ -2965,6 +2965,7 @@ module TCE = struct
 
 			add_cfg_edge g bb_switch bb_case_init (CFGCondBranch te);
 			add_cfg_edge g bb_case_init bb_case CFGGoto;
+			set_syntax_edge g bb_case_init (SEMerge bb_case); 
 
 			let load_call_args fdata = List.iter (fun (v,cv,co) ->
 				add_texpr g bb_case_init (assign_var v (mk_local cv));
@@ -3038,6 +3039,7 @@ module TCE = struct
 					List.iter (fun bb ->
 						print_endline ( Printf.sprintf "adding back edge from %d to %d " bb.bb_id bb_loophead.bb_id );
 						add_cfg_edge g bb bb_loophead CFGGoto;
+						add_cfg_edge g bb g.g_exit CFGMaybeThrow;
 					) rcall_blocks
 				end else begin
 					(* disconnect all edges to and from bbfend *)
@@ -3057,6 +3059,7 @@ module TCE = struct
 					(* set edges to g_exit *)
 					List.iter (fun bb ->
 						add_cfg_edge g bb g.g_exit CFGGoto;
+						add_cfg_edge g bb g.g_exit CFGMaybeThrow;
 					) return_blocks;
 				end;
 				dopsid (String.concat "," (List.map (fun b -> string_of_int b.bb_id) blocks )) 12345;
@@ -3077,7 +3080,7 @@ module TCE = struct
 			transfer_edges bbf bbfend tf;
 			rewrite_func_end_blocks bbf bbfend tf;
 			bb_case.bb_closed <- true;
-			(bb_case,te,rewrite_dominators) :: acc
+			(bb_case_init,te,rewrite_dominators) :: acc
 		)) mctx.funcs_by_idx [] in
 
 
