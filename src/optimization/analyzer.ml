@@ -1119,6 +1119,7 @@ module Run = struct
 		back_again ctx
 
 	let run_on_expr com config e =
+		let captured_vars = Codegen.VarCapturing.collect_captured_vars e in
 		let ctx = there com config e in
 		Graph.infer_immediate_dominators ctx.graph;
 		Graph.infer_scopes ctx.graph;
@@ -1131,7 +1132,9 @@ module Run = struct
 			if config.code_motion then with_timer "analyzer-code-motion" (fun () -> CodeMotion.apply ctx);
 			with_timer "analyzer-local-dce" (fun () -> LocalDce.apply ctx);
 		end;
-		ctx,back_again ctx
+		let e = back_again ctx in
+		let e = Codegen.VarCapturing.apply_captured_vars com captured_vars e in
+		ctx,e
 
 	let run_on_field ctx config c cf = match cf.cf_expr with
 		| Some e when not (is_ignored cf.cf_meta) && not (Codegen.is_removable_field ctx cf) ->
@@ -1164,7 +1167,10 @@ module Run = struct
 		List.iter (process_field true) c.cl_ordered_statics;
 		(match c.cl_constructor with
 		| None -> ()
-		| Some f -> process_field false f)
+		| Some f -> process_field false f);
+		(match c.cl_init with
+		| None -> ()
+		| Some e -> c.cl_init <- Some (Codegen.VarCapturing.captured_vars ctx.Typecore.com e))
 
 	let run_on_type ctx config t =
 		match t with
