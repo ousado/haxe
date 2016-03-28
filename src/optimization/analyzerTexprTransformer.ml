@@ -277,8 +277,14 @@ let rec func ctx bb tf t p =
 		| TVar(v,None) ->
 			add_texpr bb e;
 			bb
+		| TVar(v,Some({eexpr=TMeta(m,({eexpr=TFunction _} as e1))})) ->
+			v.v_meta <- m :: v.v_meta;
+			declare_var_and_assign bb v e1
 		| TVar(v,Some e1) ->
 			declare_var_and_assign bb v e1
+		| TBinop(OpAssign,({eexpr = TLocal v} as e1),{eexpr=TMeta(m,({eexpr=TFunction _} as e2))} ) ->
+			v.v_meta <- m :: v.v_meta;
+			block_element bb { e with eexpr=(TBinop(OpAssign,e1,e2))}
 		| TBinop(OpAssign,({eexpr = TLocal v} as e1),e2) ->
 			let assign e =
 				mk (TBinop(OpAssign,e1,e)) e.etype e.epos

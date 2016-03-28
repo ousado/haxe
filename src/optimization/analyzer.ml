@@ -945,6 +945,37 @@ module TCE = struct
 
 	let p_tree_ids bb = if debug then print_endline (Printf.sprintf "bb.id::%d" bb.bb_id)
 
+
+	let p_dom_tree g nmap =
+
+		let pblock bb = DynArray.iteri ( fun idx e ->
+			print_endline (Printf.sprintf "    %d::%s " idx (s_expr_pretty e ))
+		) bb.bb_el in
+		let nodes_map = fold_dom_tree g.g_root g.g_exit (fun m bb ->
+			let _ = try let n = PMap.find bb.bb_id nmap in
+					dopsid ("checking " ^ n) bb.bb_id;
+					pblock bb;
+				with Not_found ->
+					dopsid (
+						Printf.sprintf "checking unknown with dom %d  and kind %s \n  [%s] "
+						bb.bb_dominator.bb_id
+						(BasicBlock.s_block_kind bb.bb_kind)
+						(String.concat "," (List.map (fun bb -> (string_of_int bb.bb_id)) bb.bb_dominated ));
+					) bb.bb_id;
+					pblock bb;
+			in
+			if PMap.exists bb.bb_id m then begin
+				try let n = PMap.find bb.bb_id nmap in
+					dopsid n bb.bb_id;
+					assert false;
+				with Not_found ->
+					dopsid "seen block already" bb.bb_id;
+					assert false;
+				end else
+					PMap.add bb.bb_id 0 m
+		) PMap.empty in ()
+
+
 		(* 1. modify function-begin
 		*    declare + assign call-replacement variables, 1 for each argument, and optionally `this`
 		* 2. insert while (true/cond) block after start
@@ -958,6 +989,7 @@ module TCE = struct
 		* 7. replace all goto function-ends with gotos to loop-head for the recursive calls
 		* *)
 
+	(*:
 	let replace_dominator mctx bb_old bb_dom bb_term =
 		let g = mctx.actx.graph in
 		let replace bb = bb.bb_dominator.bb_id = bb_old.bb_id in
@@ -977,6 +1009,7 @@ module TCE = struct
 			List.filter (fun bb -> if bb.bb_id = bb_old.bb_id then false else true ) bb_old.bb_dominator.bb_dominated
 		else ();
 		dominated
+	*)
 
 	let transform mctx bb_dom  =
 		let g = mctx.actx.graph in
@@ -994,6 +1027,10 @@ module TCE = struct
 		let fdata_entry = PMap.find bb_dom.bb_id mctx.funcs_by_bbid in
 
 		let enull = mk(TConst(TNull)) tvoid null_pos in
+
+
+		p_dom_tree g PMap.empty;
+		dopsid "^^^^^^^^^^^^^^^^^^^^^^^^^ THERE ^^^^^^^^^^^^^^^^^^^^^^^^^^^^" 0;
 
 		(* handle `this` - get type, rewrite expressions, declare *)
 		let thisdata = begin
@@ -1036,23 +1073,14 @@ module TCE = struct
 
 		PMap.iter ( fun idx f ->
 			List.iter ( fun (v,cv,co) ->
-				(* let value = if f.f_is_entry then
-					Some(mk_local v)
-				else begin
-					v.v_name <- (Printf.sprintf "_arg%d_%s" idx v.v_name); (* unique name for non-entry function args *)
-					define_var bb_setup v None;
-					None
-				end in *)
 				if not f.f_is_entry then define_var bb_setup v None;
 				(* define_var bb_setup cv value; *)
 			) f.f_call_vars;
 		) mctx.funcs_by_idx;
 
-		(* TODO: do something with this *)
  		PMap.iter ( fun id v ->
 			(* exclude entry function arguments and the local functions themselves *)
 			if not ((PMap.exists v.v_id fdata_entry.f_call_var_m) || (PMap.exists v.v_id mctx.funcs_by_vid)) then
-				print_endline (Printf.sprintf "_tce_cap_%d_%s WAAHHHHHHHHHHHHHHHHHHHH" v.v_id v.v_name);
 				v.v_name <-  (Printf.sprintf "_tce_cap_%d_%s" v.v_id v.v_name); (* give it a horrible unique name *)
 				define_var bb_setup v None;
 		) mctx.captured_vars;
@@ -1063,21 +1091,7 @@ module TCE = struct
 		let cfgs = List.filter ( fun ce -> (match ce.cfg_kind with CFGFunction -> true | _ -> false )) bb_dom.bb_outgoing in
 		let rewrite_dom_edges = (fun () ->
 				set_syntax_edge bb_dom (SEMerge bb_setup);
-				bb_dom.bb_outgoing <- [];                    (* EDGE *)
 				add_cfg_edge bb_dom bb_setup CFGGoto;
-
-
-				bb_setup.bb_dominator <- bb_dom;
-				bb_while.bb_dominator <- bb_setup;
-				bb_loophead.bb_dominator <- bb_while;
-				bb_switch.bb_dominator <- bb_loophead;
-
-				bb_dom.bb_dominated <- [bb_setup];
-				bb_setup.bb_dominated <- [bb_while];
-				bb_while.bb_dominated <- [bb_loophead];
-				bb_loophead.bb_dominated <- [bb_switch];
-
-			(* switch dominates all the bb_case nodes *)
 		) in
 
 		(* add while(true) *)
@@ -1190,8 +1204,8 @@ module TCE = struct
 						add_texpr bb e;
 
 				) rcall_blocks;
-
-				if bbfend.bb_id = g.g_exit.bb_id then begin
+				let bb_exit = fdata_entry.f_bb_end in
+				if bbfend.bb_id = bb_exit.bb_id then begin
 					(* disconnect edges from return call to function end*)
 					List.iter ( fun bb ->
 						bb.bb_outgoing <- List.filter ( fun ce -> not (ce.cfg_to == bbfend) ) bb.bb_outgoing;
@@ -1201,7 +1215,7 @@ module TCE = struct
 					List.iter (fun bb ->
 						print_endline ( Printf.sprintf "adding back edge from %d to %d " bb.bb_id bb_loophead.bb_id );
 						add_cfg_edge bb bb_loophead CFGGoto;
-						add_cfg_edge bb g.g_exit CFGMaybeThrow;
+						add_cfg_edge bb bb_exit CFGMaybeThrow;
 					) rcall_blocks
 				end else begin
 					(* disconnect all edges to and from bbfend *)
@@ -1220,8 +1234,8 @@ module TCE = struct
 					) rcall_blocks;
 					(* set edges to g_exit *)
 					List.iter (fun bb ->
-						add_cfg_edge bb g.g_exit CFGGoto;
-						add_cfg_edge bb g.g_exit CFGMaybeThrow;
+						add_cfg_edge bb bb_exit CFGGoto;
+						add_cfg_edge bb bb_exit CFGMaybeThrow;
 					) return_blocks;
 				end;
 				dopsid (String.concat "," (List.map (fun b -> string_of_int b.bb_id) blocks )) 12345;
@@ -1229,53 +1243,26 @@ module TCE = struct
 			in
 			let (bbf,bbfend,tf) =  (fdata.f_bb_begin,fdata.f_bb_end,fdata.f_tf) in
 
+			(*
 			let rewrite_dominators = (fun () ->
 				bb_case.bb_dominator <- bb_switch;
 				bb_switch.bb_dominated <- bb_case :: bb_switch.bb_dominated;
 				dopsid "replace" bb_case.bb_id;
 				bb_case.bb_dominated <- replace_dominator mctx fdata.f_bb_begin bb_case fdata.f_bb_end;
 				dopsid "replace" bb_case.bb_id;
-			) in
+			) in *)
 
 			load_call_args fdata;
 			transfer_statements bbf bbfend tf;
 			transfer_edges bbf bbfend tf;
 			rewrite_func_end_blocks bbf bbfend tf;
 			bb_case.bb_closed <- true;
-			(bb_case_init,te,rewrite_dominators) :: acc
+			(bb_case_init,te) :: acc
 		)) mctx.funcs_by_idx [] in
 
 
-		let p_dom_tree nmap =
-			let pblock bb = DynArray.iteri ( fun idx e ->
-				print_endline (Printf.sprintf "    %d::%s " idx (s_expr_pretty e ))
-			) bb.bb_el in
-			let nodes_map = fold_dom_tree g.g_root g.g_exit (fun m bb ->
-				let _ = try let n = PMap.find bb.bb_id nmap in
-						dopsid ("checking " ^ n) bb.bb_id;
-						pblock bb;
-					with Not_found ->
-						dopsid (
-							Printf.sprintf "checking unknown with dom %d  and kind %s \n  [%s] "
-							bb.bb_dominator.bb_id
-							(BasicBlock.s_block_kind bb.bb_kind)
-							(String.concat "," (List.map (fun bb -> (string_of_int bb.bb_id)) bb.bb_dominated ));
-						) bb.bb_id;
-						pblock bb;
-				in
-				if PMap.exists bb.bb_id m then begin
-					try let n = PMap.find bb.bb_id nmap in
-						dopsid n bb.bb_id;
-						assert false;
-					with Not_found ->
-						dopsid "seen block already" bb.bb_id;
-						assert false;
-					end else
-						PMap.add bb.bb_id 0 m
-			) PMap.empty in ()
-		in
 		let bb_cases_data = bb_cases in
-		let bb_cases = List.map (fun (b,_,_) -> b) bb_cases_data in
+		let bb_cases = List.map (fun (b,_) -> b) bb_cases_data in
 
 
 		let all_blocks = [bb_setup;bb_while;bb_loophead;bb_switch] in
@@ -1283,22 +1270,19 @@ module TCE = struct
 		let nmap = List.fold_left (fun m (bb,n) -> PMap.add bb.bb_id n m) PMap.empty (List.combine all_blocks bb_names) in
 		let nmap = List.fold_left (fun m bb -> PMap.add bb.bb_id "bb_case" m) nmap bb_cases in
 
-		let switchcases = List.map (fun (bb_case,te,_) -> [te],bb_case ) (List.rev bb_cases_data) in
+		let switchcases = List.map (fun (bb_case,te) -> [te],bb_case ) (List.rev bb_cases_data) in
 		set_syntax_edge bb_switch (SESwitch(switchcases,None,g.g_unreachable));
 
-		p_dom_tree nmap;
 
 		(*rewrite_dom_edges ();*)
 
 		(*the order of the following two is important *)
-		List.iter ( fun (_,_,rewrite_dominators) -> rewrite_dominators ()) bb_cases_data;
 		rewrite_dom_edges ();
-		bb_switch.bb_dominated <- bb_cases;
 
 		infer_immediate_dominators g;
 		check_integrity g;
 
-		p_dom_tree nmap;
+		(*p_dom_tree g nmap; *)
 
 		close_blocks [bb_setup;bb_while;bb_loophead;bb_switch];
 		close_blocks bb_cases;
@@ -1331,7 +1315,7 @@ module TCE = struct
 				| _ -> e
 			) ) bb.bb_el;
 		);
-		p_dom_tree nmap;
+		(*p_dom_tree g nmap;*)
 		end;
 		dopsid "cleanup" 2;
 		()
@@ -1370,12 +1354,13 @@ module TCE = struct
 			{eexpr=TLocal v}),
 			{eexpr=TCall({eexpr = TConst (TString "fun")},[{eexpr = TConst (TInt i32)}])}) ->
 			if true then print_endline (Printf.sprintf "### adding local function %d %s " v.v_id  (v.v_name));
-
+			print_endline (Type.Printer.s_metadata v.v_meta);
 			let bb_func_id = (Int32.to_int i32) in
 			add_func_by_vid mctx v.v_id bb_func_id;
 			(match (DynArray.get bb.bb_el (idx+1)).eexpr with
 				| TVar(vleft,Some({eexpr=TLocal v2})) when (v2.v_id = v.v_id) ->
 					print_endline (Printf.sprintf "### + %d %s " v.v_id  (v.v_name));
+					print_endline (Type.Printer.s_metadata vleft.v_meta);
 					add_func_by_vid mctx vleft.v_id bb_func_id;
 				| _ -> ());
 
