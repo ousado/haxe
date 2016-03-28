@@ -1049,13 +1049,13 @@ module TCE = struct
 		) mctx.funcs_by_idx;
 
 		(* TODO: do something with this *)
-(* 		PMap.iter ( fun id v ->
+ 		PMap.iter ( fun id v ->
 			(* exclude entry function arguments and the local functions themselves *)
-			if not ((PMap.exists v.v_id fdata_entry.f_call_var_m) || (PMap.exists (original_var_id mctx v) mctx.funcs_by_vid)) then
-				let oid = original_var_id mctx v in
-				v.v_name <-  (Printf.sprintf "_tce_cap_%d_%s" oid v.v_name); (* give it a horrible unique name *)
+			if not ((PMap.exists v.v_id fdata_entry.f_call_var_m) || (PMap.exists v.v_id mctx.funcs_by_vid)) then
+				print_endline (Printf.sprintf "_tce_cap_%d_%s WAAHHHHHHHHHHHHHHHHHHHH" v.v_id v.v_name);
+				v.v_name <-  (Printf.sprintf "_tce_cap_%d_%s" v.v_id v.v_name); (* give it a horrible unique name *)
 				define_var bb_setup v None;
-		) mctx.captured_vars; *)
+		) mctx.captured_vars;
 
 		(* hook up entry function begin block - only write after bb_cases are set up *)
 
@@ -1400,9 +1400,9 @@ module TCE = struct
 
 	let fold_recursive_calls mctx bb_entry_func f acc =
 		let g = mctx.actx.graph in
-		iter_dom_tree g (fun bb ->
+		(*iter_dom_tree g (fun bb ->
 			DynArray.iteri (fun idx e -> add_local_func mctx bb idx e) bb.bb_el;
-		);
+		);*)
 		fold_dom_tree bb_entry_func g.g_exit (fun acc bb ->
 			let len = DynArray.length bb.bb_el in
 			let rec loop idx acc =
@@ -1420,6 +1420,39 @@ module TCE = struct
 				end
 			in f bb (loop 0 []) acc
 		) acc
+
+	let find_captured_vars mctx fdata = begin
+		let m = mctx.captured_vars in
+		let add_cap m v = if v.v_capture then begin
+			dopsid "###\n###\n###adding captured var " v.v_id;
+			PMap.add v.v_id v m
+		end else m in
+		let m = fold_dom_tree fdata.f_bb_begin fdata.f_bb_end (fun m bb ->
+			let m = DynArray.fold_left (fun m e ->
+				DynArray.iteri (fun idx e -> add_local_func mctx bb idx e) bb.bb_el;
+				(match e.eexpr with
+					| TVar(v,_) -> add_cap m v
+					| _ -> m )
+				) m bb.bb_el in
+				(match bb.bb_kind with
+					| BKFunctionBegin _ ->
+							(try
+								let fdata = PMap.find bb.bb_id mctx.funcs_by_bbid in
+								if not fdata.f_is_entry then
+									List.fold_left (fun m (v,co) ->
+										add_cap m v
+									) m fdata.f_tf.tf_args
+								else m
+							with Not_found ->
+								m)
+					| _ -> m)
+		) m in
+		PMap.iter ( fun id v -> dopsid v.v_name id  ) m;
+		dopsid "### CAPS ^ " 0;
+		mctx.captured_vars <- m
+	end
+
+
 
 	let rec apply ctx c cf = begin
 		let mctx = {
@@ -1445,13 +1478,7 @@ module TCE = struct
 
 		let fdata_entry = Option.get (find_func_by_field mctx c cf) in
 
-		mctx.captured_vars <- DynArray.fold_left ( fun acc vi ->
-			(* exclude args of the entry function *)
-			if vi.vi_origin.v_capture && not (PMap.exists vi.vi_origin.v_id fdata_entry.f_call_var_m) then
-				PMap.add vi.vi_origin.v_id vi.vi_origin acc
-			else
-				acc
-		) PMap.empty g.g_var_infos;
+		find_captured_vars mctx fdata_entry;
 
 		(* for now (and later in strict mode) we handle any calls not in tail position as errors  *)
 		let recursive_call_results =
