@@ -823,7 +823,7 @@ module TCE = struct
 		f_bb_decl      : BasicBlock.t option;
 		mutable f_is_entry : bool;
 		mutable f_kind     : fdata_kind;                        (* defaults to FKLocal, needs to be changed after *)
-		mutable f_blocks   : BasicBlock.t list;                (* all blocks that are initially pert of this function *)
+		mutable f_blocks   : BasicBlock.t list;                 (* all blocks that are initially pert of this function *)
 		mutable f_mode     : tce_mode;							(* must become either TCEStrict or TCENo *)
 	(*	f_exclude   : bool;               (* exclude from transformation *)
 		f_selfrec   : bool;               (* does it call itself? *)
@@ -991,7 +991,6 @@ module TCE = struct
 
 
 	let p_dom_tree g nmap =
-
 		let pblock bb = DynArray.iteri ( fun idx e ->
 			print_endline (Printf.sprintf "    %d::%s " idx (s_expr_pretty e ))
 		) bb.bb_el in
@@ -1020,18 +1019,18 @@ module TCE = struct
 		) PMap.empty in ()
 
 
-		(* 1. modify function-begin
-		*    declare + assign call-replacement variables, 1 for each argument, and optionally `this`
-		* 2. insert while (true/cond) block after start
-		* 3. insert loop-head block after while-start block
-		* 4. insert switch after loop-head
-		* 5. insert one case for each mutual recursive function
-		*      5.1 transfer the statements from function-begin into the respective case block
-		*          transfer outgoing edges from function-begin to case block
-		* 6. replace all occurences of recursive calls with assignments to the respective locals that replace
-		*    the arguments
-		* 7. replace all goto function-ends with gotos to loop-head for the recursive calls
-		* *)
+	(* 1. modify function-begin
+	*    declare + assign call-replacement variables, 1 for each argument, and optionally `this`
+	* 2. insert while (true/cond) block after start
+	* 3. insert loop-head block after while-start block
+	* 4. insert switch after loop-head
+	* 5. insert one case for each mutual recursive function
+	*      5.1 transfer the statements from function-begin into the respective case block
+	*          transfer outgoing edges from function-begin to case block
+	* 6. replace all occurences of recursive calls with assignments to the respective locals that replace
+	*    the arguments
+	* 7. replace all goto function-ends with gotos to loop-head for the recursive calls
+	* *)
 
 	let transform mctx =
 		let g = mctx.actx.graph in
@@ -1040,6 +1039,7 @@ module TCE = struct
 		let tbool = mctx.actx.com.basic.tbool in
 		let define_var bb v value =
 			declare_var g v bb;
+			(*dopsid ("### defining var " ^ v.v_name) v.v_id;*)
 			let e = mk (TVar( v, value)) tvoid null_pos in
 			add_texpr bb e
 		in
@@ -1094,14 +1094,26 @@ module TCE = struct
 		);
 
 		PMap.iter ( fun idx f ->
-			List.iter ( fun (v,cv,co) -> if not f.f_is_entry then define_var bb_setup v None; ) f.f_call_vars;
+			List.iter ( fun (v,cv,co) ->
+				if not f.f_is_entry then begin
+				(*dopsid ("defining var " ^ v.v_name) f.f_bb_begin.bb_id;*)
+				define_var bb_setup v None;
+			end) f.f_call_vars;
 		) mctx.funcs_by_idx;
 
  		PMap.iter ( fun id v ->
 			(* exclude entry function arguments and the local functions themselves *)
-			if not ((PMap.exists v.v_id fdata_entry.f_call_var_m) || (PMap.exists v.v_id mctx.funcs_by_vid)) then
+			let is_fentry_argument = (PMap.exists v.v_id fdata_entry.f_call_var_m) in
+			let is_tce_func_but_not_entry = (match find_func_by_vid mctx v.v_id with
+				| Some fdata -> if not fdata.f_is_entry then true else false
+				| _ -> false) in
+			let exclude = is_fentry_argument || is_tce_func_but_not_entry in
+			(*print_endline (Printf.sprintf "is entry call var: %B is tce_func_but_not_entry %B  %b | %d %s "
+										is_fentry_argument is_tce_func_but_not_entry exclude v.v_id v.v_name); *)
+			if not exclude then begin
 				v.v_name <-  (Printf.sprintf "_tce_cap_%d_%s" v.v_id v.v_name); (* give it a horrible unique name *)
-				define_var bb_setup v None;
+				define_var bb_setup v None
+			end
 		) mctx.captured_vars;
 
 		(* hook up entry function begin block - only write after bb_cases are set up *)
@@ -1144,13 +1156,12 @@ module TCE = struct
 			add_cfg_edge bb_case_init bb_case CFGGoto;
 			set_syntax_edge bb_case_init (SEMerge bb_case);
 
-			let transfer_statements bbf bbt tf = (* TODO : transform `this` *)
+			let transfer_statements bbf bbt tf =
 				if PMap.exists bbf.bb_id  mctx.recursive_calls then begin
 					let m = mctx.recursive_calls in (* a bit of a hack here, TODO *)
 					let (bb,call_idx,fdata_callee,args,othis) = (PMap.find bbf.bb_id m) in
 					mctx.recursive_calls <- PMap.add bb_case.bb_id (bb_case,call_idx,fdata_callee,args,othis) m;
 				end else ();
-				(* when we're transferring TVars, do we have to declare_var them in the new block?*)
 				DynArray.iteri ( fun idx e ->
 					DynArray.set bbf.bb_el idx enull;
 					add_texpr bb_case e
@@ -1261,13 +1272,12 @@ module TCE = struct
 		let switchcases = List.map (fun (bb_case,te) -> [te],bb_case ) (List.rev bb_cases_data) in
 		set_syntax_edge bb_switch (SESwitch(switchcases,None,g.g_unreachable));
 
-		(*the order of the following two is important *)
 		rewrite_dom_edges ();
 
 		infer_immediate_dominators g;
 		(*check_integrity g;*)
 
-		(* p_dom_tree g nmap; *)
+		(*p_dom_tree g nmap;*)
 
 		close_blocks [bb_setup;bb_while;bb_loophead;bb_switch];
 		close_blocks bb_cases;
@@ -1276,6 +1286,13 @@ module TCE = struct
 		 * remove all eliminated functions *)
 		if true then begin
 		iter_dom_tree g (fun bb ->
+			dynarray_map (fun e -> (match e.eexpr with
+				| TVar(v,_)
+				| TBinop(OpAssign,{eexpr=TLocal v},_) -> (match find_func_by_vid mctx v.v_id with
+					| Some fdata -> if not fdata.f_is_entry then enull else e
+					| _ -> e)
+				| _ -> e
+			)) bb.bb_el;
 			(* exclude bb_setup here *)
 			let exclude = bb.bb_id = bb_setup.bb_id in
 			dynarray_map (fun e -> (match e.eexpr with
@@ -1283,9 +1300,6 @@ module TCE = struct
 					if not exclude && (PMap.exists v.v_id mctx.captured_vars) then
 						Option.map_default ( fun evalue -> assign_var v evalue) enull eo
 					else e
-				| TBinop(OpAssign,{eexpr=TLocal v},_) -> (match find_func_by_vid mctx v.v_id with
-					| Some fdata -> if not fdata.f_is_entry then enull else e
-					| _ -> e)
 				| _ -> e
 			) ) bb.bb_el;
 		);
@@ -1318,14 +1332,6 @@ module TCE = struct
 			let e = DynArray.get bb.bb_el idx in
 			(ctx.com.warning "call not in tail position" e.epos )
 		) (List.rev l)
-
-
-	let warn_valid_calls ctx l  =
-		List.iter (fun (bb,idx,_,_,_) ->
-			let e = DynArray.get bb.bb_el idx in
-			(ctx.com.warning "call in tail position" e.epos )
-		) (List.rev l)
-
 
 	let edge_to_exit bb = (match bb.bb_outgoing with
 		| [{cfg_to={bb_kind = BKFunctionEnd }}] -> true
@@ -1380,6 +1386,8 @@ module TCE = struct
 					| TVar(vleft,Some({eexpr=TLocal v2})) when (v2.v_id = v.v_id) -> [v;vleft]
 					| _ -> [v])
 				in
+				(* print_endline (Printf.sprintf " found function %s vidx %s for function "
+				 * v.v_name (String.concat "," (List.map (fun v -> string_of_int v.v_id) vars) ));*)
 				let get_meta m = (match m with
 					| (Meta.Analyzer,[(EConst(Ident "tce_strict"),_)],_) -> Some TCEStrict
 					| (Meta.Analyzer,[(EConst(Ident "no_tce"),_)],_) -> Some TCENo
@@ -1468,7 +1476,7 @@ module TCE = struct
 						| TCEMaybe,TCEStrict -> 			(* we enter tce mode - create a new map for this group, add it to the list *)
 							((PMap.add f.bb_id f PMap.empty) :: maps),TCEStrict
 						| TCEStrict,TCENo ->
-								maps,TCENo              	(* no_tce is declared - don't include f *)
+							maps,TCENo              		(* no_tce is declared - don't include f *)
 						| TCEStrict,(TCEMaybe|TCEStrict) -> (* we're in strict mode, so there must be a map in the list *)
 							(match maps with
 								| [] -> assert false
@@ -1507,6 +1515,7 @@ module TCE = struct
 
 			(* the lowest func block id is the entry point *)
 			let fdata_entry = PMap.find (List.hd func_ids) mctx.funcs_by_bbid in
+			(*dopsid "entry func id: " fdata_entry.f_bb_begin.bb_id;*)
 			fdata_entry.f_is_entry <- true;
 			mctx.entry_func <- Some(fdata_entry);
 
