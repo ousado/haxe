@@ -29,6 +29,8 @@ type t = {
 	local_dce : bool;
 	fusion : bool;
 	purity_inference : bool;
+	tail_call_elimination : bool;
+	tce_local : bool;
 	dot_debug : bool;
 }
 
@@ -39,12 +41,14 @@ let flag_local_dce = "local_dce"
 let flag_fusion = "fusion"
 let flag_purity_inference = "purity_inference"
 let flag_ignore = "ignore"
+let flag_tail_call_elimination = "tce_strict"
+let flag_tce_local = "tce_local"
 let flag_dot_debug = "dot_debug"
 
 let all_flags =
 	List.fold_left (fun acc flag ->
 		flag :: ("no_" ^ flag) :: acc
-	) [] [flag_const_propagation;flag_copy_propagation;flag_code_motion;flag_local_dce;flag_fusion;flag_purity_inference;flag_ignore;flag_dot_debug]
+	) [] [flag_const_propagation;flag_copy_propagation;flag_code_motion;flag_local_dce;flag_fusion;flag_purity_inference;flag_ignore;flag_tail_call_elimination;flag_dot_debug]
 
 let has_analyzer_option meta s =
 	try
@@ -79,6 +83,8 @@ let get_base_config com =
 		local_dce = not (Common.raw_defined com "analyzer-no-local-dce");
 		fusion = not (Common.raw_defined com "analyzer-no-fusion") && (match com.platform with Flash | Java -> false | _ -> true);
 		purity_inference = not (Common.raw_defined com "analyzer-no-purity-inference");
+		tail_call_elimination = false;
+		tce_local = false;
 		dot_debug = false;
 	}
 
@@ -98,6 +104,8 @@ let update_config_from_meta com config meta =
 				| EConst (Ident s) when s = flag_fusion -> { config with fusion = true}
 				| EConst (Ident s) when s = "no_" ^ flag_purity_inference -> { config with purity_inference = false}
 				| EConst (Ident s) when s = flag_purity_inference -> { config with purity_inference = true}
+				| EConst (Ident s) when s = flag_tail_call_elimination -> { config with tail_call_elimination = true}
+				| EConst (Ident s) when s = flag_tce_local -> { config with tce_local = true}
 				| EConst (Ident s) when s = flag_dot_debug -> {config with dot_debug = true}
 				| _ ->
 					let s = Ast.s_expr e in

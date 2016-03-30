@@ -290,6 +290,8 @@ let rec func ctx bb tf t p =
 				add_texpr bb {e with eexpr = TBinop(OpAssign,e1,e2)};
 				bb
 			end
+		| TMeta((Meta.Analyzer,_,_) as m,({eexpr = TVar(v,_)} as e1)) ->
+				v.v_meta <- m :: v.v_meta; block_element bb e1
 		(* branching *)
 		| TMeta((Meta.MergeBlock,_,_),{eexpr = TBlock el}) ->
 			block_el bb el
