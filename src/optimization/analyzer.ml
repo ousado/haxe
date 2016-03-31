@@ -1333,22 +1333,48 @@ module TCE = struct
 			(ctx.com.warning "call not in tail position" e.epos )
 		) (List.rev l)
 
-	let rec edge_to_exit bb =
-		let follow_empty_blocks bb = (match bb.bb_outgoing with
-			| [{cfg_to=({bb_el=bb_el} as bb)}] when (DynArray.length bb_el) = 0 -> edge_to_exit bb
+	let remove_all_edges bb =
+		bb.bb_incoming <- [];
+		bb.bb_outgoing <- []
+
+	let remove_edges_from bbfrom bbto =
+		bbto.bb_incoming <- List.filter (fun ce -> (match ce with
+			| {cfg_from={bb_id=bb_id}} when bb_id=bbfrom.bb_id -> false
+			| _ -> true )) bbto.bb_incoming
+
+	let rec edge_to_exit mctx bb =
+		let rec remove_empty_blocks bb bbe =
+			(* let g = mctx.actx.graph in *)
+			(match bbe.bb_outgoing with
+			| [{cfg_to=({bb_kind = BKFunctionEnd } as bbfend)}] ->
+				bb.bb_outgoing <- [];
+				remove_edges_from bbe bbfend;
+				remove_all_edges bbe;
+				add_cfg_edge bb bbfend CFGGoto;
+			| [{cfg_to=bbe_next}] ->
+				remove_all_edges bbe;
+				remove_empty_blocks bb bbe_next
+			| _ -> assert false
+			)
+		in
+		let rec follow_empty_blocks bb = (match bb.bb_outgoing with
+			| [{cfg_to={bb_kind = BKFunctionEnd }}] -> true
+			| [{cfg_to=({bb_el=bb_el} as bb)}] when (DynArray.length bb_el) = 0 -> follow_empty_blocks bb
 			| _ -> false)
 		in
 		(match bb.bb_outgoing with
-		| [{cfg_to={bb_kind = BKFunctionEnd }}] -> true
-		| [{cfg_to=bb}] -> follow_empty_blocks bb
-		| _ -> false)
+			| [{cfg_to={bb_kind = BKFunctionEnd }}] -> true
+			| [{cfg_to=bbe}] -> if follow_empty_blocks bbe then begin
+				remove_empty_blocks bb bbe;
+				true end else false
+			| _ -> false)
 
-	let is_valid_tce_call bb idx =
+	let is_valid_tce_call mctx bb idx =
 		let len = DynArray.length bb.bb_el in
 		if idx = len-2 then (match (DynArray.get bb.bb_el (len-1)).eexpr with
-			| TReturn None -> edge_to_exit bb
+			| TReturn None -> edge_to_exit mctx bb
 			| _-> false
-		) else ( idx = (len -1) && edge_to_exit bb )
+		) else ( idx = (len -1) && edge_to_exit mctx bb )
 
 
 	let fold_rec_calls mctx f acc2 =
@@ -1362,7 +1388,7 @@ module TCE = struct
 
 	let check_and_get_recursive_calls mctx =
 		let rcall_results = fold_rec_calls mctx ( fun bb rec_calls acc ->
-			let is_valid_tce_call (_,idx,_,_,_) =  is_valid_tce_call bb idx in
+			let is_valid_tce_call (_,idx,_,_,_) =  is_valid_tce_call mctx bb idx in
 			let invalid = List.filter (fun c -> not (is_valid_tce_call c)) rec_calls in
 			let res = (match invalid with
 				| [] -> RValue rec_calls
