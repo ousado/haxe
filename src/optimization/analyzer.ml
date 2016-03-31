@@ -1333,9 +1333,22 @@ module TCE = struct
 			(ctx.com.warning "call not in tail position" e.epos )
 		) (List.rev l)
 
-	let edge_to_exit bb = (match bb.bb_outgoing with
+	let rec edge_to_exit bb =
+		let follow_empty_blocks bb = (match bb.bb_outgoing with
+			| [{cfg_to=({bb_el=bb_el} as bb)}] when (DynArray.length bb_el) = 0 -> edge_to_exit bb
+			| _ -> false)
+		in
+		(match bb.bb_outgoing with
 		| [{cfg_to={bb_kind = BKFunctionEnd }}] -> true
+		| [{cfg_to=bb}] -> follow_empty_blocks bb
 		| _ -> false)
+
+	let is_valid_tce_call bb idx =
+		let len = DynArray.length bb.bb_el in
+		if idx = len-2 then (match (DynArray.get bb.bb_el (len-1)).eexpr with
+			| TReturn None -> edge_to_exit bb
+			| _-> false
+		) else ( idx = (len -1) && edge_to_exit bb )
 
 
 	let fold_rec_calls mctx f acc2 =
@@ -1349,8 +1362,7 @@ module TCE = struct
 
 	let check_and_get_recursive_calls mctx =
 		let rcall_results = fold_rec_calls mctx ( fun bb rec_calls acc ->
-			let len = DynArray.length bb.bb_el in
-			let is_valid_tce_call (_,idx,_,_,_) = (idx = len-1) && edge_to_exit bb in
+			let is_valid_tce_call (_,idx,_,_,_) =  is_valid_tce_call bb idx in
 			let invalid = List.filter (fun c -> not (is_valid_tce_call c)) rec_calls in
 			let res = (match invalid with
 				| [] -> RValue rec_calls
@@ -1382,7 +1394,8 @@ module TCE = struct
 			{eexpr=TCall({eexpr = TConst (TString "fun")},[{eexpr = TConst (TInt i32)}])}) ->
 			begin
 				let bb_func_id = (Int32.to_int i32) in
-				let vars = (match (DynArray.get bb.bb_el (idx+1)).eexpr with
+				let vars = if not (DynArray.length bb.bb_el > (idx+1)) then [v] else
+					(match (DynArray.get bb.bb_el (idx+1)).eexpr with
 					| TVar(vleft,Some({eexpr=TLocal v2})) when (v2.v_id = v.v_id) -> [v;vleft]
 					| _ -> [v])
 				in
