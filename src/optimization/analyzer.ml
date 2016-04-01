@@ -1071,7 +1071,7 @@ module TCE = struct
 
 		let enull = mk(TConst(TNull)) tvoid null_pos in
 
-		p_dom_tree g PMap.empty;
+		(*p_dom_tree g PMap.empty;*)
 
 		(* handle `this` - get type, rewrite expressions, declare *)
 		let thisdata = begin
@@ -1204,12 +1204,9 @@ module TCE = struct
 				set_syntax_edge bb_case bbf.bb_syntax_edge
 			in
 
-				let rewrite_func_end_blocks bbf bbfend tf =
+			let rewrite_func_end_blocks bbf bbfend tf =
 				(* all incoming edges of bfend need to be redirected to the end of the main function or
 				* to the loop header *)
-				(*let blocks = List.map (fun ce -> ce.cfg_from) bbfend.bb_incoming in
-				let rcall_blocks = List.filter (fun bb -> PMap.exists bb.bb_id mctx.recursive_calls) blocks in 
-				let return_blocks = List.filter (fun bb -> not (PMap.exists bb.bb_id mctx.recursive_calls)) blocks in *)
 
 				let rcall_blocks = PMap.fold (fun cd acc -> cd.cd_block :: acc ) fdata.f_rec_tail_calls [] in
 
@@ -1240,7 +1237,6 @@ module TCE = struct
 
 				) fdata.f_rec_tail_calls;
 
-				(* thanks Void .. this just got much more complicated *)
 				let accounted_for = PMap.fold (fun cd m ->
 					List.fold_left (fun m bb -> PMap.add bb.bb_id bb m) m cd.cd_intermediates) fdata.f_rec_tail_calls PMap.empty in
 
@@ -1251,7 +1247,7 @@ module TCE = struct
 				 * encountered all blocks containing the tail-calls themselves - only then we can be sure that there are
 				 * no unaccounted for incoming cfg edges
 				 * *)
-				
+
 				let is_void = function (* TODO use version in type.ml *)
 						| TAbstract({a_path=[],"Void"},_) -> true
 						| _ -> false
@@ -1326,38 +1322,6 @@ module TCE = struct
 				in
 				List.iter handle_non_rcall non_rcall_blocks
 
-				(*
-				if bbfend.bb_id = bb_exit.bb_id then begin
-					(* disconnect edges from return call to function end*)
-					List.iter ( fun bb ->
-						bb.bb_outgoing <- List.filter ( fun ce -> not (ce.cfg_to == bbfend) ) bb.bb_outgoing;
-						bbfend.bb_incoming <- List.filter ( fun ce -> not (ce.cfg_from == bb ) ) bbfend.bb_incoming;
-					) rcall_blocks;
-					(* connect to loop header *)
-					List.iter (fun bb ->
-						add_cfg_edge bb bb_loophead CFGGoto;
-						add_cfg_edge bb bb_exit CFGMaybeThrow;
-					) rcall_blocks
-				end else begin
-					(* disconnect all edges to and from bbfend *)
-					List.iter ( fun bb ->
-						bb.bb_outgoing <- List.filter ( fun ce -> not (ce.cfg_to == bbfend) ) bb.bb_outgoing;
-					) blocks;
-					List.iter (fun bb ->
-						bb.bb_incoming <- List.filter ( fun ce -> not (ce.cfg_from == bbfend) ) bb.bb_incoming;
-					) ( List.map ( fun ce -> ce.cfg_to) bbfend.bb_outgoing);
-					bbfend.bb_incoming <- [];
-					bbfend.bb_outgoing <- [];
-					(* set edges to loopheader *)
-					List.iter (fun bb ->
-						add_cfg_edge bb bb_loophead CFGGoto;
-					) rcall_blocks;
-					(* set edges to bb_exit *)
-					List.iter (fun bb ->
-						add_cfg_edge bb bb_exit CFGGoto;
-						add_cfg_edge bb bb_exit CFGMaybeThrow;
-					) return_blocks;
-				end; *)
 			in
 			let (bbf,bbfend,tf) =  (fdata.f_bb_begin,fdata.f_bb_end,fdata.f_tf) in
 
@@ -1437,62 +1401,11 @@ module TCE = struct
 			| _ -> None)
 		in loop e
 
-	(*
-	let warn_invalid_calls ctx l  =
-		List.iter (fun (bb,idx,_,_,_) ->
-			let e = DynArray.get bb.bb_el idx in
-			(ctx.com.warning "call not in tail position" e.epos )
-		) (List.rev l)
-
-	let remove_all_edges bb =
-		bb.bb_incoming <- [];
-		bb.bb_outgoing <- []
-
-	let remove_edges_from bbfrom bbto =
-		bbto.bb_incoming <- List.filter (fun ce -> (match ce with
-			| {cfg_from={bb_id=bb_id}} when bb_id=bbfrom.bb_id -> false
-			| _ -> true )) bbto.bb_incoming
-
-	let rec edge_to_exit mctx bb =
-		let rec remove_empty_blocks bb bbe =
-			(* let g = mctx.actx.graph in *)
-			(match bbe.bb_outgoing with
-			| [{cfg_to=({bb_kind = BKFunctionEnd } as bbfend)}] ->
-				bb.bb_outgoing <- [];
-				remove_edges_from bbe bbfend;
-				remove_all_edges bbe;
-				add_cfg_edge bb bbfend CFGGoto;
-			| [{cfg_to=bbe_next}] ->
-				remove_all_edges bbe;
-				remove_empty_blocks bb bbe_next
-			| _ -> assert false
-			)
-		in
-		let rec follow_empty_blocks bb = (match bb.bb_outgoing with
-			| [{cfg_to={bb_kind = BKFunctionEnd }}] -> true
-			| [{cfg_to=({bb_el=bb_el} as bb)}] when (DynArray.length bb_el) = 0 -> follow_empty_blocks bb
-			| _ -> false)
-		in
-		(match bb.bb_outgoing with
-			| [{cfg_to={bb_kind = BKFunctionEnd }}] -> true
-			| [{cfg_to=bbe}] -> if follow_empty_blocks bbe then begin
-				remove_empty_blocks bb bbe;
-				true end else false
-			| _ -> false)
-	*)
 
 	let edge_to_exit bb =
 		(match bb.bb_outgoing with
 			| [{cfg_to={bb_kind = BKFunctionEnd }}] -> true
 			| _ -> false )
-	(*
-	let is_valid_tce_call mctx fdata bb idx =
-		let len = DynArray.length bb.bb_el in
-		if idx = len-2 then (match (DynArray.get bb.bb_el (len-1)).eexpr with
-			| TReturn None -> edge_to_exit mctx bb
-			| _-> false
-		) else ( idx = (len -1) && edge_to_exit mctx bb )
-	*)
 
 	let find_rec_calls mctx fdata =
 		List.iter ( fun bb ->
@@ -1565,27 +1478,6 @@ module TCE = struct
 			end else
 				raise TCE_failed
 
-	(*
-	let check_and_get_recursive_calls mctx fdata =
-		let rcall_results = fold_rec_calls mctx fdata ( fun bb rec_calls acc ->
-			let is_valid_tce_call cd =  is_valid_tce_call mctx fdata bb idx in
-			let invalid = List.filter (fun c -> not (is_valid_tce_call c)) rec_calls in
-			let res = (match invalid with
-				| [] -> RValue rec_calls
-				| l  -> warn_invalid_calls mctx.actx l;
-						RError "some calls were not in tail position - see above warnings for more."
-			) in res :: acc
-		) [] in
-		let recursive_calls = List.fold_left ( fun acc res -> (match res with
-			| RError e -> error e null_pos;
-			| RValue [calldata] -> calldata :: acc
-			| RValue [] -> acc
-			| _ -> assert false )
-		) [] rcall_results in
-		mctx.recursive_calls <- List.fold_left ( fun m cd ->
-			let (bb,_,_,_,_) = cd in PMap.add bb.bb_id cd m
-		) PMap.empty recursive_calls
-	*)
 
 	let add_cap m v = if v.v_capture then PMap.add v.v_id v m else m
 
