@@ -338,7 +338,10 @@ module Graph = struct
 	let infer_immediate_dominators g =
 		let info = Hashtbl.create 0 in
 		let nodes = DynArray.create () in
-		let get_info i = Hashtbl.find info i in
+		let get_info i = try Hashtbl.find info i with Not_found ->
+			print_endline ("Not_found bb_id: "^(string_of_int i));
+			assert false;
+		in
 		let add_info bb bb_parent =
 			let rec bbi = {
 				bb = bb;
