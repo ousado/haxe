@@ -814,7 +814,17 @@ module TCE = struct
 		| FKInstance of tclass * tclass_field
 		| FKLocal
 
-	type fdata = {
+	type calldata = {
+		cd_block : BasicBlock.t;
+		cd_idx   : int;
+		cd_expr  : texpr;
+		mutable cd_intermediates : BasicBlock.t list;
+		cd_fdata : fdata;
+		cd_args  : texpr list;
+		cd_this  : texpr option;
+	}
+
+	and fdata = {
 		f_index        : int;                                   (* the index used for the switch *)
 		f_tf           : tfunc;
 		f_call_var_m   : (int,tvar) PMap.t;                     (* the local var used as tmp var to 'call' this function *)
@@ -826,10 +836,14 @@ module TCE = struct
 		mutable f_kind     : fdata_kind;                        (* defaults to FKLocal, needs to be changed after *)
 		mutable f_blocks   : BasicBlock.t list;                 (* all blocks that are initially pert of this function *)
 		mutable f_mode     : tce_mode;							(* must become either TCEStrict or TCENo *)
+		mutable f_rec_tail_calls : (int,calldata) PMap.t;       (* all recursive calls in tail position, indexed by block*)
+		mutable f_rec_calls : calldata list;                    (* all recursive calls, potentially not in tail position *)
 	(*	f_exclude   : bool;               (* exclude from transformation *)
 		f_selfrec   : bool;               (* does it call itself? *)
 		f_mutualrec : bool;               (* does it call others in the same group? *) *)
 	}
+
+	exception TCE_failed
 
 	let mk_fdata f_index f_tf f_call_var_m f_call_vars f_bb_begin f_bb_end f_bb_decl f_kind =
 		{ f_index=f_index;
@@ -842,6 +856,8 @@ module TCE = struct
 		f_is_entry=false;
 		f_kind=f_kind;
 		f_blocks = [];
+		f_rec_tail_calls = PMap.empty;
+		f_rec_calls = [];
 		f_mode = TCEMaybe;
 	}
 
@@ -1019,6 +1035,8 @@ module TCE = struct
 					PMap.add bb.bb_id 0 m
 		) PMap.empty in ()
 
+	let filter_cfg_goto ce = (match ce with {cfg_kind=CFGGoto} -> true | _-> false)
+	let filter_cfg_gotos cfgs = List.filter filter_cfg_goto cfgs
 
 	(* 1. modify function-begin
 	*    declare + assign call-replacement variables, 1 for each argument, and optionally `this`
@@ -1053,7 +1071,7 @@ module TCE = struct
 
 		let enull = mk(TConst(TNull)) tvoid null_pos in
 
-		(* p_dom_tree g PMap.empty; *)
+		p_dom_tree g PMap.empty;
 
 		(* handle `this` - get type, rewrite expressions, declare *)
 		let thisdata = begin
@@ -1186,19 +1204,21 @@ module TCE = struct
 				set_syntax_edge bb_case bbf.bb_syntax_edge
 			in
 
-			let rewrite_func_end_blocks bbf bbfend tf =
+				let rewrite_func_end_blocks bbf bbfend tf =
 				(* all incoming edges of bfend need to be redirected to the end of the main function or
 				* to the loop header *)
-				let blocks = List.map (fun ce -> ce.cfg_from) bbfend.bb_incoming in
-				let rcall_blocks = List.filter (fun bb -> PMap.exists bb.bb_id mctx.recursive_calls) blocks in
-				let return_blocks = List.filter (fun bb -> not (PMap.exists bb.bb_id mctx.recursive_calls)) blocks in
+				(*let blocks = List.map (fun ce -> ce.cfg_from) bbfend.bb_incoming in
+				let rcall_blocks = List.filter (fun bb -> PMap.exists bb.bb_id mctx.recursive_calls) blocks in 
+				let return_blocks = List.filter (fun bb -> not (PMap.exists bb.bb_id mctx.recursive_calls)) blocks in *)
 
-				List.iter ( fun bb ->
-						let calldata = PMap.find bb.bb_id mctx.recursive_calls in
-						let (bb,call_idx,fdata_callee,args,othis) = calldata in
+				let rcall_blocks = PMap.fold (fun cd acc -> cd.cd_block :: acc ) fdata.f_rec_tail_calls [] in
+
+				PMap.iter ( fun bb_id cd ->
 						(* 1. remove call *)
-						DynArray.delete bb.bb_el call_idx; (* set this to null, rather? *)
-						let calldata_args = (List.combine fdata_callee.f_call_vars args) in
+						DynArray.delete cd.cd_block.bb_el cd.cd_idx; (* set this to null, rather? *)
+						let bb = cd.cd_block in
+						let fdata_callee = cd.cd_fdata in
+						let calldata_args = (List.combine fdata_callee.f_call_vars cd.cd_args) in
 						let cvs = List.map (fun ((v,cv,co),evalue) ->
 							let cv = alloc_var cv.v_name cv.v_type in
 							define_var bb cv (Some evalue);
@@ -1209,16 +1229,104 @@ module TCE = struct
 							let e = assign_var v cv_value in
 							add_texpr bb e;
 						) (List.combine calldata_args cvs);
-						(match (othis,thisdata) with
+						(match (cd.cd_this,thisdata) with
 							| Some(evalue),Some(ethis,vthis,f) ->
 								add_texpr bb (assign_var vthis (f evalue))
 							| _ -> ()
 						);
 						let e = assign_var tce_loop_var (mk_int fdata_callee.f_index) in
 						add_texpr bb e;
+						add_texpr bb (mk (TContinue) tvoid null_pos);
 
-				) rcall_blocks;
+				) fdata.f_rec_tail_calls;
+
+				(* thanks Void .. this just got much more complicated *)
+				let accounted_for = PMap.fold (fun cd m ->
+					List.fold_left (fun m bb -> PMap.add bb.bb_id bb m) m cd.cd_intermediates) fdata.f_rec_tail_calls PMap.empty in
+
+				(* we walk back from function-end, if we encounter an incoming CFGGoto edge that isn't in accounted_for
+				 * it means that edge comes from not-a-tail-call - if we're in a Void function, we have to add a return
+				 * because otherwise our loop will run forever
+				 * However, since we can come across nodes with several incoming edges, we have to walk back until we've
+				 * encountered all blocks containing the tail-calls themselves - only then we can be sure that there are
+				 * no unaccounted for incoming cfg edges
+				 * *)
+				
+				let is_void = function (* TODO use version in type.ml *)
+						| TAbstract({a_path=[],"Void"},_) -> true
+						| _ -> false
+				in
+
+				let from_blocks cfgs = List.map (fun {cfg_from=bb} -> bb) cfgs in
+				let to_blocks cfgs = List.map (fun {cfg_to=bb} -> bb) cfgs in
+
+				let cfg_disconnect bb_from bb_to = begin
+					bb_from.bb_outgoing <- List.filter (fun ce -> not (ce.cfg_to.bb_id == bb_to.bb_id)) bb_from.bb_outgoing;
+					bb_to.bb_incoming <- List.filter (fun ce -> not (ce.cfg_from.bb_id == bb_from.bb_id)) bb_to.bb_incoming;
+				end in
+
+				let cfg_disconnect_outgoing bb_from =
+					List.iter (fun bb_to -> cfg_disconnect bb_from bb_to) (to_blocks bb_from.bb_outgoing) in
+				let cfg_disconnect_incoming bb_to =
+					List.iter (fun bb_from -> cfg_disconnect bb_from bb_to) (from_blocks bb_to.bb_incoming) in
+
+				let rec walk_back bb acc_unaccounted =
+					if PMap.exists bb.bb_id fdata.f_rec_tail_calls then
+						acc_unaccounted
+					else begin
+						let inc = filter_cfg_gotos bb.bb_incoming in
+						let acc_unaccounted = List.fold_left (fun acc_unaccounted bb_next ->
+							if not (PMap.exists bb_next.bb_id accounted_for) then
+								(bb,bb_next) :: acc_unaccounted
+							else
+								walk_back bb acc_unaccounted
+						) acc_unaccounted (from_blocks inc) in acc_unaccounted
+					end
+				in
+				let non_rcall_blocks = walk_back fdata.f_bb_end [] in
 				let bb_exit = fdata_entry.f_bb_end in
+
+				(* we completely disconnect the function end and remove intermediate nodes from the graph
+				 * to avoid confusing dom inference before setting the necessary edges again *)
+				let remove = PMap.foldi (fun k v m ->
+					if not (PMap.exists k fdata.f_rec_tail_calls) then
+						PMap.add k v m
+					else m
+				) accounted_for PMap.empty in
+				PMap.iter ( fun id bb ->
+					 cfg_disconnect_outgoing bb;
+					 cfg_disconnect_incoming bb;
+				) remove;
+
+				if not fdata.f_is_entry then begin
+					cfg_disconnect_outgoing fdata.f_bb_end;
+					cfg_disconnect_incoming fdata.f_bb_end;
+				end;
+
+				let handle_rcall bb =
+					cfg_disconnect bb fdata.f_bb_end;
+					cfg_disconnect_outgoing bb;
+					add_cfg_edge bb bb_loophead CFGGoto;
+					add_cfg_edge bb bb_exit CFGMaybeThrow; (* this allows LocalDCE to find the block *)
+				in
+				List.iter handle_rcall rcall_blocks;
+
+				let handle_non_rcall (bb_to,bb_non_rcall) =
+					cfg_disconnect bb_non_rcall bb_to;
+					let bb_next = if is_void fdata_entry.f_tf.tf_type then begin
+						let bb = create_node g BKNormal tvoid null_pos in
+						add_texpr bb (mk (TReturn None) tvoid null_pos);
+						add_cfg_edge bb bb_exit CFGGoto;
+						set_syntax_edge bb_non_rcall (SEMerge bb);
+						bb
+					end else
+						bb_exit
+					in
+					add_cfg_edge bb_non_rcall bb_next CFGGoto
+				in
+				List.iter handle_non_rcall non_rcall_blocks
+
+				(*
 				if bbfend.bb_id = bb_exit.bb_id then begin
 					(* disconnect edges from return call to function end*)
 					List.iter ( fun bb ->
@@ -1249,7 +1357,7 @@ module TCE = struct
 						add_cfg_edge bb bb_exit CFGGoto;
 						add_cfg_edge bb bb_exit CFGMaybeThrow;
 					) return_blocks;
-				end;
+				end; *)
 			in
 			let (bbf,bbfend,tf) =  (fdata.f_bb_begin,fdata.f_bb_end,fdata.f_tf) in
 
@@ -1275,6 +1383,7 @@ module TCE = struct
 
 		rewrite_dom_edges ();
 
+		check_integrity g;
 		infer_immediate_dominators g;
 		(*check_integrity g;*)
 
@@ -1328,6 +1437,7 @@ module TCE = struct
 			| _ -> None)
 		in loop e
 
+	(*
 	let warn_invalid_calls ctx l  =
 		List.iter (fun (bb,idx,_,_,_) ->
 			let e = DynArray.get bb.bb_el idx in
@@ -1369,27 +1479,96 @@ module TCE = struct
 				remove_empty_blocks bb bbe;
 				true end else false
 			| _ -> false)
+	*)
 
-	let is_valid_tce_call mctx bb idx =
+	let edge_to_exit bb =
+		(match bb.bb_outgoing with
+			| [{cfg_to={bb_kind = BKFunctionEnd }}] -> true
+			| _ -> false )
+	(*
+	let is_valid_tce_call mctx fdata bb idx =
 		let len = DynArray.length bb.bb_el in
 		if idx = len-2 then (match (DynArray.get bb.bb_el (len-1)).eexpr with
 			| TReturn None -> edge_to_exit mctx bb
 			| _-> false
 		) else ( idx = (len -1) && edge_to_exit mctx bb )
+	*)
 
-
-	let fold_rec_calls mctx f acc2 =
-		List.fold_left ( fun acc2 bb ->
-			let rec_calls = dynarray_foldi ( fun idx acc te ->
+	let find_rec_calls mctx fdata =
+		List.iter ( fun bb ->
+			DynArray.iteri( fun idx te ->
 				let callo = (has_tce_call mctx te) in
-				Option.map_default 	(fun (fdata,args,othis) -> (bb,idx,fdata,args,othis) :: acc ) acc callo
-			) [] bb.bb_el
-			in f bb rec_calls acc2
-		) acc2 mctx.group_blocks
+				fdata.f_rec_calls <- (match callo with
+					| Some (fdata_callee,args,othis) ->
+						{	cd_block=bb;
+							cd_idx=idx;
+							cd_expr=te;
+							cd_intermediates=[];
+							cd_fdata=fdata_callee;
+							cd_args=args;
+							cd_this=othis
+						} :: fdata.f_rec_calls
+					| _ -> fdata.f_rec_calls )
+			) bb.bb_el
+		) fdata.f_blocks
 
-	let check_and_get_recursive_calls mctx =
-		let rcall_results = fold_rec_calls mctx ( fun bb rec_calls acc ->
-			let is_valid_tce_call (_,idx,_,_,_) =  is_valid_tce_call mctx bb idx in
+
+	let rec list_until_exit bb idx acc_el acc_blocks =
+		let len = DynArray.length bb.bb_el in
+		let rec loop idx acc acc_blocks =
+			if idx < len then
+				loop (idx+1) ((bb,idx,(DynArray.get bb.bb_el idx)) :: acc_el) acc_blocks
+			else (match filter_cfg_gotos bb.bb_outgoing with (* only one outgoing cfg goto is allowed here *)
+				| [{cfg_to={bb_kind=BKFunctionEnd}}] ->
+						Some (acc_el,acc_blocks)
+				| [{cfg_to=bb_next}] ->
+						list_until_exit bb_next 0 acc_el (bb :: acc_blocks)
+				| _ -> None) (* this is indicates that the call is in an invalid position *)
+		in loop idx acc_el acc_blocks
+
+	let check_rec_call mctx fdata invalid_acc cd =
+		let add_valid_tail_call cd =
+			fdata.f_rec_tail_calls <- PMap.add cd.cd_block.bb_id cd fdata.f_rec_tail_calls
+		in
+		let bb_el = cd.cd_block.bb_el in
+		let len = DynArray.length bb_el in
+		if cd.cd_idx = len-1 && edge_to_exit cd.cd_block then begin
+			add_valid_tail_call cd;
+			invalid_acc
+		end else begin match (list_until_exit cd.cd_block (len-1) [] []) with
+			| Some (acc_el,acc_blocks) ->
+					let el = List.filter (* the only expressions allowed here are void returns *)
+								( fun (_,_,e) -> match e.eexpr with TReturn None -> false | _ -> true ) acc_el in
+					if el != [] then
+						cd :: invalid_acc
+					else begin
+						cd.cd_intermediates <- acc_blocks;
+						add_valid_tail_call cd;
+						invalid_acc
+					end
+			| None -> cd :: invalid_acc
+		end
+
+	let check_rec_calls mctx error_with_warnings =
+		let check_function fdata invalid =
+			let invalid_calls = List.fold_left (check_rec_call mctx fdata) [] fdata.f_rec_calls in
+			invalid_calls :: invalid
+		in
+		let invalid_calls = PMap.fold check_function mctx.funcs_by_bbid [] in
+		match invalid_calls with
+		| [[]] -> ()
+		| _ ->
+			if error_with_warnings then begin
+			let invalid_calls = List.flatten invalid_calls in
+			List.iter (fun cd -> mctx.actx.com.warning "call not in tail position" cd.cd_expr.epos ) (List.rev invalid_calls);
+			error "Analyzer TCE: Some calls are not in tail position - see above warnings for more." null_pos;
+			end else
+				raise TCE_failed
+
+	(*
+	let check_and_get_recursive_calls mctx fdata =
+		let rcall_results = fold_rec_calls mctx fdata ( fun bb rec_calls acc ->
+			let is_valid_tce_call cd =  is_valid_tce_call mctx fdata bb idx in
 			let invalid = List.filter (fun c -> not (is_valid_tce_call c)) rec_calls in
 			let res = (match invalid with
 				| [] -> RValue rec_calls
@@ -1406,6 +1585,7 @@ module TCE = struct
 		mctx.recursive_calls <- List.fold_left ( fun m cd ->
 			let (bb,_,_,_,_) = cd in PMap.add bb.bb_id cd m
 		) PMap.empty recursive_calls
+	*)
 
 	let add_cap m v = if v.v_capture then PMap.add v.v_id v m else m
 
@@ -1574,10 +1754,11 @@ module TCE = struct
 					List.iter ( fun v -> add_func_by_vid mctx v.v_id p.bb_id ) vars;
 				with
 					Not_found -> ());
+				find_rec_calls mctx fdata;
+				check_rec_calls mctx true; (* TODO check tce_mode for try_and_bail *)
 				blocks :: acc
 			) m [] in
 			mctx.group_blocks <- (List.flatten group_blocks);
-			check_and_get_recursive_calls mctx;
 			transform mctx;
 		) group_maps
 	end
