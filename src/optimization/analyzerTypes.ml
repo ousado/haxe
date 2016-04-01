@@ -215,7 +215,7 @@ module Graph = struct
 
 	let get_var_info g v = match v.v_extra with
 		| Some(_,Some {eexpr = TConst (TInt i32)}) -> DynArray.get g.g_var_infos (Int32.to_int i32)
-		| _ -> print_endline (Printf.sprintf "var info for var %s with id %d not found " v.v_name v.v_id);
+		| _ -> print_endline (Printf.sprintf "var info for var %s with id %d not found" v.v_name v.v_id);
 				assert false
 
 	let declare_var g v bb =

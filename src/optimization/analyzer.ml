@@ -800,6 +800,11 @@ module TCE = struct
 		| TCEMaybe
 		| TCENo
 
+	type tce_invocation =
+		| ITCEStrict
+		| ITCELocal
+		| ITCETry
+
 	let s_tce_mode = function
 		| TCEStrict -> "TCEStrict"
 		| TCEMaybe -> "TCEMaybe"
@@ -1521,11 +1526,16 @@ module TCE = struct
 		| _ -> None )
 
 
-	let apply ctx c cf tce_mode = begin
+	let apply ctx c cf tce_invocation = begin
 		let g = ctx.graph in
 		let bb_entry = (match g.g_root.bb_outgoing with
 		    | [{cfg_to={bb_kind=BKFunctionBegin _} as bb}] -> bb
 			| _ -> assert false (* really?? *)
+		) in
+		let (tce_mode,raise_on_error) = (match tce_invocation with
+			| ITCELocal -> TCEMaybe,false
+			| ITCEStrict -> TCEStrict,false
+			| ITCETry -> TCEStrict,true
 		) in
 		(*p_dom_tree g PMap.empty;*)
 		(* get all blocks that belong to one function, excluding sub functions, collect sub function entry blocks separately *)
@@ -1573,7 +1583,10 @@ module TCE = struct
 		(* build groups of tce functions *)
 		let get_mode bb = let (mode,_) = try
 			PMap.find bb.bb_id mode_vars_m with Not_found ->
-				error ( "Internal Error: child function not found: " ^ s_bbids [bb]) bb.bb_pos
+				if raise_on_error then
+					raise TCE_failed
+				else
+					error ( "Analyzer/TCE module internal error: child function not found: " ^ s_bbids [bb]) bb.bb_pos
 			in mode
 		in
 		let get_fdata bb = (PMap.find bb.bb_id fdata_m) in
@@ -1647,7 +1660,7 @@ module TCE = struct
 				with
 					Not_found -> ());
 				find_rec_calls mctx fdata;
-				check_rec_calls mctx true; (* TODO check tce_mode for try_and_bail *)
+				check_rec_calls mctx (not raise_on_error); (* TODO check tce_mode for try_and_bail *)
 				blocks :: acc
 			) m [] in
 			mctx.group_blocks <- (List.flatten group_blocks);
@@ -1989,8 +2002,12 @@ module Run = struct
 		let ctx = there com config e in
 		Graph.infer_immediate_dominators ctx.graph;
 		begin match cfo with
-			| Some (c,cf) when config.tail_call_elimination -> TCE.apply ctx c cf TCE.TCEStrict
-			| Some (c,cf) when config.tce_local -> TCE.apply ctx c cf TCE.TCEMaybe
+			| Some (c,cf)  ->
+				if config.tail_call_elimination && config.tce_local then
+					error "Only one of tce_strict and tce_local is allowed on a field" cf.cf_pos
+				else if config.tail_call_elimination then TCE.apply ctx c cf TCE.ITCEStrict
+				else if config.tce_local then TCE.apply ctx c cf TCE.ITCELocal
+				else if (Common.raw_defined com "TCE") then (try TCE.apply ctx c cf TCE.ITCETry with TCE.TCE_failed -> ())
 			| _ -> ()
 		end;
 		Graph.infer_var_writes ctx.graph;
