@@ -2014,7 +2014,7 @@ module Run = struct
 		back_again ctx
 
 	let run_on_expr com config cfo e =
-		let captured_vars = Codegen.VarCapturing.collect_captured_vars e in
+		(*let captured_vars = Codegen.VarCapturing.collect_captured_vars e in*)
 		let ctx = there com config e in
 		Graph.infer_immediate_dominators ctx.graph;
 		begin match cfo with
@@ -2037,15 +2037,17 @@ module Run = struct
 			with_timer "analyzer-local-dce" (fun () -> LocalDce.apply ctx);
 		end;
 		let e = back_again ctx in
-		let e = Codegen.VarCapturing.apply_captured_vars com captured_vars e in
+		(*let e = Codegen.VarCapturing.apply_captured_vars com captured_vars e in*)
 		ctx,e
 
 	let run_on_field ctx config c cf = match cf.cf_expr with
 		| Some e when not (is_ignored cf.cf_meta) && not (Codegen.is_removable_field ctx cf) ->
+			let captured_vars = Codegen.VarCapturing.collect_captured_vars e in
 			let config = update_config_from_meta ctx.Typecore.com config cf.cf_meta in
 			let actx,e = run_on_expr ctx.Typecore.com config (Some(c,cf)) e in
 			let e = Cleanup.reduce_control_flow ctx e in
 			if config.dot_debug then Debug.dot_debug actx c cf;
+			let e = Codegen.VarCapturing.apply_captured_vars ctx.Typecore.com captured_vars e in
 			cf.cf_expr <- Some e;
 		| _ -> ()
 
