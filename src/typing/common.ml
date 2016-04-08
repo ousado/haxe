@@ -47,6 +47,7 @@ type stats = {
 type platform =
 	| Cross
 	| Js
+	| Lua
 	| Neko
 	| Flash
 	| Php
@@ -98,6 +99,12 @@ type display_mode =
 	| DMResolve of string
 	| DMType
 
+type compiler_callback = {
+	mutable after_typing : (module_type list -> unit) list;
+	mutable before_dce : (unit -> unit) list;
+	mutable after_generation : (unit -> unit) list;
+}
+
 type context = {
 	(* config *)
 	version : int;
@@ -117,8 +124,7 @@ type context = {
 	mutable error : string -> pos -> unit;
 	mutable warning : string -> pos -> unit;
 	mutable load_extern_type : (path -> pos -> (string * Ast.package) option) list; (* allow finding types which are not in sources *)
-	mutable filters : (unit -> unit) list;
-	mutable final_filters : (unit -> unit) list;
+	callbacks : compiler_callback;
 	mutable defines_signature : string option;
 	mutable print : string -> unit;
 	mutable get_macros : unit -> context option;
@@ -179,6 +185,7 @@ module Define = struct
 		| DumpIgnoreVarIds
 		| DynamicInterfaceClosures
 		| EraseGenerics
+		| FastCast
 		| Fdb
 		| FileExtension
 		| FlashStrict
@@ -199,6 +206,8 @@ module Define = struct
 		| JsUnflatten
 		| KeepOldOutput
 		| LoopUnrollMaxCost
+	        | LuaVer
+	        | LuaJit
 		| Macro
 		| MacroTimes
 		| NekoSource
@@ -254,18 +263,19 @@ module Define = struct
 		| CoreApi -> ("core_api","Defined in the core api context")
 		| CoreApiSerialize -> ("core_api_serialize","Mark some generated core api classes with the Serializable attribute on C#")
 		| Cppia -> ("cppia", "Generate cpp instruction assembly")
-		| Dce -> ("dce","<mode:std|full||no> Set the dead code elimination mode (default std)")
+		| Dce -> ("dce","<mode:std|full|no> Set the dead code elimination mode (default std)")
 		| DceDebug -> ("dce_debug","Show DCE log")
 		| Debug -> ("debug","Activated when compiling with -debug")
 		| Display -> ("display","Activated during completion")
 		| DllExport -> ("dll_export", "GenCPP experimental linking")
 		| DllImport -> ("dll_import", "GenCPP experimental linking")
 		| DocGen -> ("doc_gen","Do not perform any removal/change in order to correctly generate documentation")
-		| Dump -> ("dump","Dump the complete typed AST for internal debugging in a dump subdirectory - use dump=pretty for Haxe-like formatting")
+		| Dump -> ("dump","<mode:pretty|record|legacy> Dump typed AST in dump subdirectory using specified mode or non-prettified default")
 		| DumpDependencies -> ("dump_dependencies","Dump the classes dependencies in a dump subdirectory")
 		| DumpIgnoreVarIds -> ("dump_ignore_var_ids","Remove variable IDs from non-pretty dumps (helps with diff)")
 		| DynamicInterfaceClosures -> ("dynamic_interface_closures","Use slow path for interface closures to save space")
 		| EraseGenerics -> ("erase_generics","Erase generic classes on C#")
+		| FastCast -> ("fast_cast","Enables an experimental casts cleanup on C# and Java")
 		| Fdb -> ("fdb","Enable full flash debug infos for FDB interactive debugging")
 		| FileExtension -> ("file_extension","Output filename extension for cpp source code")
 		| FlashStrict -> ("flash_strict","More strict typing for flash target")
@@ -287,6 +297,8 @@ module Define = struct
 		| JsUnflatten -> ("js_unflatten","Generate nested objects for packages and types")
 		| KeepOldOutput -> ("keep_old_output","Keep old source files in the output directory (for C#/Java)")
 		| LoopUnrollMaxCost -> ("loop_unroll_max_cost","Maximum cost (number of expressions * iterations) before loop unrolling is canceled (default 250)")
+		| LuaJit -> ("lua_jit","Enable the jit compiler for lua (version 5.2 only")
+		| LuaVer -> ("lua_ver","The lua version to target")
 		| Macro -> ("macro","Defined when code is compiled in the macro context")
 		| MacroTimes -> ("macro_times","Display per-macro timing when used with --times")
 		| NetVer -> ("net_ver", "<version:20-45> Sets the .NET version to be targeted")
@@ -400,6 +412,7 @@ module MetaInfo = struct
 		| Extern -> ":extern",("Marks the field as extern so it is not generated",[UsedOn TClassField])
 		| FakeEnum -> ":fakeEnum",("Treat enum as collection of values of the specified type",[HasParam "Type name";UsedOn TEnum])
 		| File -> ":file",("Includes a given binary file into the target Swf and associates it with the class (must extend flash.utils.ByteArray)",[HasParam "File path";UsedOn TClass;Platform Flash])
+		| FileXml -> ":fileXml",("Include xml attribute snippet in Build.xml entry for file",[UsedOn TClass;Platform Cpp])
 		| Final -> ":final",("Prevents a class from being extended",[UsedOn TClass])
 		| Fixed -> ":fixed",("Delcares an anonymous object to have fixed fields",[ (*UsedOn TObjectDecl(_)*)])
 		| FlatEnum -> ":flatEnum",("Internally used to mark an enum as being flat, i.e. having no function constructors",[UsedOn TEnum; Internal])
@@ -432,6 +445,7 @@ module MetaInfo = struct
 		| JavaCanonical -> ":javaCanonical",("Used by the Java target to annotate the canonical path of the type",[HasParam "Output type package";HasParam "Output type name";UsedOnEither [TClass;TEnum]; Platform Java])
 		| JavaNative -> ":javaNative",("Automatically added by -java-lib on classes generated from JAR/class files",[Platform Java; UsedOnEither[TClass;TEnum]; Internal])
 		| JsRequire -> ":jsRequire",("Generate javascript module require expression for given extern",[Platform Js; UsedOn TClass])
+		| LuaRequire -> ":luaRequire",("Generate lua module require expression for given extern",[Platform Lua; UsedOn TClass])
 		| Keep -> ":keep",("Causes a field or type to be kept by DCE",[])
 		| KeepInit -> ":keepInit",("Causes a class to be kept by DCE even if all its field are removed",[UsedOn TClass])
 		| KeepSub -> ":keepSub",("Extends @:keep metadata to all implementing and extending classes",[UsedOn TClass])
@@ -462,7 +476,8 @@ module MetaInfo = struct
 		| Op -> ":op",("Declares an abstract field as being an operator overload",[HasParam "The operation";UsedOn TAbstractField])
 		| Optional -> ":optional",("Marks the field of a structure as optional",[UsedOn TClassField])
 		| Overload -> ":overload",("Allows the field to be called with different argument types",[HasParam "Function specification (no expression)";UsedOn TClassField])
-		| PhpConstants -> ":phpConstants",("Marks the fields of an TAbstract as php constants, without $",[Platform Php;UsedOn TClass])
+		| PhpConstants -> ":phpConstants",("Marks the static fields of a class as PHP constants, without $",[Platform Php;UsedOn TClass])
+		| PhpGlobal -> ":phpGlobal",("Puts the static fields of a class in the global PHP namespace",[Platform Php;UsedOn TClass])
 		| Public -> ":public",("Marks a class field as being public",[UsedOn TClassField])
 		| PublicFields -> ":publicFields",("Forces all class fields of inheriting classes to be public",[UsedOn TClass])
 		| QuotedField -> ":quotedField",("Used internally to mark structure fields which are quoted in syntax",[Internal])
@@ -482,6 +497,7 @@ module MetaInfo = struct
 		| RuntimeValue -> ":runtimeValue",("Marks an abstract as being a runtime value",[UsedOn TAbstract])
 		| SelfCall -> ":selfCall",("Translates method calls into calling object directly",[UsedOn TClassField; Platform Js])
 		| Setter -> ":setter",("Generates a native setter function on the given field",[HasParam "Class field name";UsedOn TClassField;Platform Flash])
+		| StackOnly -> ":stackOnly",("Instances of this type can only appear on the stack",[Platform Cpp])
 		| StoredTypedExpr -> ":storedTypedExpr",("Used internally to reference a typed expression returned from a macro",[Internal])
 		| SkipCtor -> ":skipCtor",("Used internally to generate a constructor as if it were a native type (no __hx_ctor)",[Platforms [Java;Cs]; Internal])
 		| SkipReflection -> ":skipReflection",("Used internally to annotate a field that shouldn't have its reflection data generated",[Platforms [Java;Cs]; UsedOn TClassField; Internal])
@@ -565,6 +581,12 @@ let get_config com =
 			pf_sys = false;
 			pf_capture_policy = CPLoopVars;
 			pf_reserved_type_paths = [([],"Object");([],"Error")];
+		}
+	| Lua ->
+		{
+			default_config with
+			pf_static = false;
+			pf_capture_policy = CPLoopVars;
 		}
 	| Neko ->
 		{
@@ -658,8 +680,11 @@ let create v args =
 		package_rules = PMap.empty;
 		file = "";
 		types = [];
-		filters = [];
-		final_filters = [];
+		callbacks = {
+			after_typing = [];
+			before_dce = [];
+			after_generation = [];
+		};
 		modules = [];
 		main = None;
 		flash_version = 10.;
@@ -733,6 +758,7 @@ let file_extension file =
 
 let platforms = [
 	Js;
+	Lua;
 	Neko;
 	Flash;
 	Php;
@@ -746,6 +772,7 @@ let platforms = [
 let platform_name = function
 	| Cross -> "cross"
 	| Js -> "js"
+	| Lua -> "lua"
 	| Neko -> "neko"
 	| Flash -> "flash"
 	| Php -> "php"
@@ -880,11 +907,14 @@ let error msg p = raise (Abort (msg,p))
 
 let platform ctx p = ctx.platform = p
 
+let add_typing_filter ctx f =
+	ctx.callbacks.after_typing <- f :: ctx.callbacks.after_typing
+
 let add_filter ctx f =
-	ctx.filters <- f :: ctx.filters
+	ctx.callbacks.before_dce <- f :: ctx.callbacks.before_dce
 
 let add_final_filter ctx f =
-	ctx.final_filters <- f :: ctx.final_filters
+	ctx.callbacks.after_generation <- f :: ctx.callbacks.after_generation
 
 let find_file ctx f =
 	try

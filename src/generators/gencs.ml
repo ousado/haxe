@@ -181,6 +181,8 @@ let rec change_md = function
 		change_md (t_to_md a.a_this)
 	| TClassDecl( { cl_kind = KAbstractImpl ({ a_this = TInst(impl,_) } as a) }) when Meta.has Meta.Delegate a.a_meta ->
 		TClassDecl impl
+	| TClassDecl( { cl_kind = KAbstractImpl (a) }) when Meta.has Meta.CoreType a.a_meta ->
+		TAbstractDecl a
 	| md -> md
 
 (* ******************************************* *)
@@ -426,6 +428,9 @@ struct
 			| _ -> ""
 		in
 
+		let as_var = alloc_var "__as__" t_dynamic in
+		let fast_cast = Common.defined gen.gcon Define.FastCast in
+
 		let rec run e =
 			match e.eexpr with
 
@@ -478,7 +483,7 @@ struct
 							{ e with eexpr = TNew(boxed_ptr,[],[expr]) }
 						| Some e ->
 							run e)
-				| TCast(expr, _) when is_bool e.etype && not (is_exactly_bool gen expr.etype) ->
+				| TCast(expr, _) when is_bool e.etype && is_dynamic gen expr.etype ->
 					{
 						eexpr = TCall(
 							mk_static_field_access_infer runtime_cl "toBool" expr.epos [],
@@ -487,7 +492,7 @@ struct
 						etype = basic.tbool;
 						epos = e.epos
 					}
-				| TCast(expr, _) when is_int_float gen e.etype && not (is_cs_basic_type (gen.greal_type expr.etype)) && ( Common.defined gen.gcon Define.EraseGenerics || not (is_null e.etype) ) && name() <> "haxe.lang.Runtime" ->
+				| TCast(expr, _) when is_int_float gen e.etype && is_dynamic gen expr.etype && ( Common.defined gen.gcon Define.EraseGenerics || not (is_null e.etype) ) && name() <> "haxe.lang.Runtime" ->
 					let needs_cast = match gen.gfollow#run_f e.etype with
 						| TInst _ -> false
 						| _ -> true
@@ -505,6 +510,23 @@ struct
 					} in
 
 					if needs_cast then mk_cast e.etype ret else ret
+
+				| TCast(expr, _) when Common.defined gen.gcon Define.EraseGenerics && like_i64 e.etype && is_dynamic gen expr.etype && name() <> "haxe.lang.Runtime" ->
+					{
+						eexpr = TCall(
+							mk_static_field_access_infer runtime_cl "toLong" expr.epos [],
+							[ run expr ]
+						);
+						etype = ti64;
+						epos = expr.epos
+					}
+
+				| TCast(expr, Some(TClassDecl cls)) when fast_cast && cls == null_class ->
+					if is_cs_basic_type (gen.greal_type e.etype) || is_tparam (gen.greal_type e.etype) then
+						{ e with eexpr = TCast(run expr, Some(TClassDecl null_class)) }
+					else
+						{ e with eexpr = TCall(mk_local as_var e.epos, [run expr]) }
+
 				| TCast(expr, _) when (is_string e.etype) && (not (is_string expr.etype)) && name() <> "haxe.lang.Runtime" ->
 					{ e with eexpr = TCall( mk_static_field_access_infer runtime_cl "toString" expr.epos [], [run expr] ) }
 				| TBinop( (Ast.OpNotEq as op), e1, e2)
@@ -909,7 +931,7 @@ let configure gen =
 				else
 					(match real_type t with
 						| TInst( { cl_kind = KTypeParameter _ }, _ ) -> TInst(null_t, [t])
-						| _ when is_cs_basic_type t -> TInst(null_t, [t])
+						| t when is_cs_basic_type t -> TInst(null_t, [t])
 						| _ -> real_type t)
 			| TAbstract _
 			| TType _ -> t
@@ -1298,6 +1320,7 @@ let configure gen =
 					(match c with
 						| TInt i32 ->
 							write w (Int32.to_string i32);
+							(* these suffixes won't work because of the cast detector which will set each constant to its expected type *)
 							(*match real_type e.etype with
 								| TType( { t_path = (["haxe";"_Int64"], "NativeInt64") }, [] ) -> write w "L";
 								| _ -> ()
@@ -1366,7 +1389,7 @@ let configure gen =
 				| TField (e, s) ->
 					expr_s w e; write w "."; write_field w (field_name s)
 				| TTypeExpr mt ->
-					(match mt with
+					(match change_md mt with
 						| TClassDecl { cl_path = (["haxe"], "Int64") } -> write w ("global::" ^ module_s mt)
 						| TClassDecl { cl_path = (["haxe"], "Int32") } -> write w ("global::" ^ module_s mt)
 						| TClassDecl cl -> write w (t_s (TInst(cl, List.map (fun _ -> t_empty) cl.cl_params)));
@@ -1982,6 +2005,34 @@ let configure gen =
 		end;
 	in
 
+	let needs_unchecked e =
+		let rec loop e = match e.eexpr with
+		(* a non-zero integer constant means that we want unchecked context *)
+		| TConst (TInt i) when i <> Int32.zero ->
+			raise Exit
+
+		(* don't recurse into explicit checked blocks *)
+		| TCall ({ eexpr = TLocal({ v_name = "__checked__" }) }, _) ->
+			()
+
+		(* skip reflection field hashes as they are safe *)
+		| TNew ({ cl_path = (["haxe"; "lang"],"DynamicObject") }, [], [_; e1; _; e2]) ->
+			loop e1;
+			loop e2
+		| TNew ({ cl_path = (["haxe"; "lang"],"Closure") }, [], [eo; _; _]) ->
+			loop eo
+		| TCall ({ eexpr = TField (_, FStatic ({ cl_path = ["haxe"; "lang"],"Runtime" },
+				 { cf_name = "getField" | "setField" | "getField_f" | "setField_f" | "callField" })) },
+				 eo :: _ :: _ :: rest) ->
+			loop eo;
+			List.iter loop rest
+
+		| _ ->
+			Type.iter loop e
+		in
+		try (loop e; false) with Exit -> true
+	in
+
 	let rec gen_class_field w ?(is_overload=false) is_static cl is_final cf =
 		gen_attributes w cf.cf_meta;
 		let is_interface = cl.cl_interface in
@@ -2097,33 +2148,6 @@ let configure gen =
 											| _ -> assert false (* FIXME *)
 								in
 
-								let needs_unchecked e =
-									let rec loop e = match e.eexpr with
-									(* a non-zero integer constant means that we want unchecked context *)
-									| TConst (TInt i) when i <> Int32.zero ->
-										raise Exit
-
-									(* don't recurse into explicit checked blocks *)
-									| TCall ({ eexpr = TLocal({ v_name = "__checked__" }) }, _) ->
-										()
-
-									(* skip reflection field hashes as they are safe *)
-									| TNew ({ cl_path = (["haxe"; "lang"],"DynamicObject") }, [], [_; e1; _; e2]) ->
-										loop e1;
-										loop e2
-									| TNew ({ cl_path = (["haxe"; "lang"],"Closure") }, [], [eo; _; _]) ->
-										loop eo
-									| TCall ({ eexpr = TField (_, FStatic ({ cl_path = ["haxe"; "lang"],"Runtime" },
-											 { cf_name = "getField" | "setField" | "getField_f" | "setField_f" | "callField" })) },
-											 eo :: _ :: _ :: rest) ->
-										loop eo;
-										List.iter loop rest
-
-									| _ ->
-										Type.iter loop e
-									in
-									try (loop e; false) with Exit -> true
-								in
 								let write_method_expr e =
 									match e.eexpr with
 									| TBlock [] ->
@@ -2445,7 +2469,13 @@ let configure gen =
 			| None -> ()
 			| Some init ->
 				print w "static %s() " (snd cl.cl_path);
-				expr_s w (mk_block init);
+				if needs_unchecked init then begin
+					begin_block w;
+					write w "unchecked ";
+					expr_s w (mk_block init);
+					end_block w;
+				end else
+					expr_s w (mk_block init);
 				line_reset_directive w;
 				newline w;
 				newline w

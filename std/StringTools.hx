@@ -34,7 +34,7 @@ class StringTools {
 	/**
 		Encode an URL by using the standard format.
 	**/
-	#if (!java && !cpp) inline #end public static function urlEncode( s : String ) : String {
+	#if (!java && !cpp && !lua) inline #end public static function urlEncode( s : String ) : String {
 		#if flash
 			return untyped __global__["encodeURIComponent"](s);
 		#elseif neko
@@ -44,9 +44,7 @@ class StringTools {
 		#elseif cpp
 			return untyped s.__URLEncode();
 		#elseif java
-			try
-				return untyped __java__("java.net.URLEncoder.encode(s, \"UTF-8\")")
-			catch (e:Dynamic) throw e;
+			return postProcessUrlEncode(java.net.URLEncoder.encode(s, "UTF-8"));
 		#elseif cs
 			return untyped cs.system.Uri.EscapeDataString(s);
 		#elseif python
@@ -55,15 +53,58 @@ class StringTools {
 			var len = 0;
 			var b = @:privateAccess s.bytes.urlEncode(len);
 			return @:privateAccess String.__alloc__(b,len);
+		#elseif lua
+			s = lua.NativeStringTools.gsub(s, "\n", "\r\n");
+			s = lua.NativeStringTools.gsub(s, "([^%w %-%_%.%~])", function (c) {
+				return lua.NativeStringTools.format("%%%02X", lua.NativeStringTools.byte(c) + '');
+			});
+			s = lua.NativeStringTools.gsub(s, " ", "+");
+			return s;
 		#else
 			return null;
 		#end
 	}
 
+#if java
+	private static function postProcessUrlEncode( s : String ) : String {
+		var ret = new StringBuf();
+		var i = 0,
+		    len = s.length;
+		while (i < len) {
+			switch(_charAt(s, i++)) {
+			case '+'.code:
+				ret.add('%20');
+			case '%'.code if (i <= len - 2):
+				var c1 = _charAt(s, i++),
+				    c2 = _charAt(s, i++);
+				switch[c1, c2] {
+				case ['2'.code, '1'.code]:
+					ret.addChar('!'.code);
+				case ['2'.code, '7'.code]:
+					ret.addChar('\''.code);
+				case ['2'.code, '8'.code]:
+					ret.addChar('('.code);
+				case ['2'.code, '9'.code]:
+					ret.addChar(')'.code);
+				case ['7'.code, 'E'.code]:
+					ret.addChar('-'.code);
+				case _:
+					ret.addChar('%'.code);
+					ret.addChar(cast c1);
+					ret.addChar(cast c2);
+				}
+			case chr:
+				ret.addChar(cast chr);
+			}
+		}
+		return ret.toString();
+	}
+#end
+
 	/**
 		Decode an URL using the standard format.
 	**/
-	#if (!java && !cpp) inline #end public static function urlDecode( s : String ) : String {
+	#if (!java && !cpp && !lua) inline #end public static function urlDecode( s : String ) : String {
 		#if flash
 			return untyped __global__["decodeURIComponent"](s.split("+").join(" "));
 		#elseif neko
@@ -84,6 +125,12 @@ class StringTools {
 			var len = 0;
 			var b = @:privateAccess s.bytes.urlDecode(len);
 			return @:privateAccess String.__alloc__(b,len);
+		#elseif lua
+			s = lua.NativeStringTools.gsub (s, "+", " ");
+			s = lua.NativeStringTools.gsub (s, "%%(%x%x)",
+				function(h) {return lua.NativeStringTools.char(lua.Lua.tonumber(h,16));});
+			s = lua.NativeStringTools.gsub (s, "\r\n", "\n");
+			return s;
 		#else
 			return null;
 		#end
@@ -196,7 +243,7 @@ class StringTools {
 		`s`, the result is false.
 	**/
 	public static function isSpace( s : String, pos : Int ) : Bool {
-		#if python
+		#if (python || lua)
 		if (s.length == 0 || pos < 0 || pos >= s.length) return false;
 		#end
 		var c = s.charCodeAt( pos );
@@ -405,6 +452,8 @@ class StringTools {
 		return if (index >= s.length) -1 else python.internal.UBuiltins.ord(python.Syntax.arrayAccess(s, index));
 		#elseif hl
 		return @:privateAccess s.bytes.getUI16(index << 1);
+		#elseif lua
+		return lua.NativeStringTools.byte(s,index+1);
 		#else
 		return untyped s.cca(index);
 		#end
@@ -418,7 +467,7 @@ class StringTools {
 		return c == 0;
 		#elseif js
 		return c != c; // fast NaN
-		#elseif neko
+		#elseif (neko || lua)
 		return c == null;
 		#elseif cs
 		return c == -1;

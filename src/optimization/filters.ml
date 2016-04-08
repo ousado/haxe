@@ -725,8 +725,8 @@ let run com tctx main =
 	(* PASS 1: general expression filters *)
 	let filters = [
 		Codegen.AbstractCast.handle_abstract_casts tctx;
-		check_local_vars_init;
 		Optimizer.inline_constructors tctx;
+		check_local_vars_init;
 		Optimizer.reduce_expression tctx;
 	] in
 	List.iter (run_expression_filters tctx filters) new_types;
@@ -739,7 +739,7 @@ let run com tctx main =
 	] in
 	List.iter (run_expression_filters tctx filters) new_types;
 	next_compilation();
-	List.iter (fun f -> f()) (List.rev com.filters); (* macros onGenerate etc. *)
+	List.iter (fun f -> f()) (List.rev com.callbacks.before_dce); (* macros onGenerate etc. *)
 	List.iter (save_class_state tctx) new_types;
 	(* PASS 2: type filters pre-DCE *)
 	List.iter (fun t ->

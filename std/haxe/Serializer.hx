@@ -27,7 +27,7 @@ package haxe;
 
 	This class can be used in two ways:
 
-	- create a `new Serializer()` instance, call its serialize() method with
+	- create a `new Serializer()` instance, call its `serialize()` method with
 		any argument and finally retrieve the String representation from
 		`toString()`
 	- call `Serializer.run()` to obtain the serialized representation of a
@@ -43,7 +43,7 @@ class Serializer {
 
 	/**
 		If the values you are serializing can contain circular references or
-		objects repetitions, you should set USE_CACHE to true to prevent
+		objects repetitions, you should set `USE_CACHE` to true to prevent
 		infinite loops.
 
 		This may also reduce the size of serialization Strings at the expense of
@@ -262,7 +262,7 @@ class Serializer {
 				#if (flash || python || hl)
 				var v : Array<Dynamic> = v;
 				#end
-				var l = #if (neko || flash || php || cs || java || python || hl) v.length #elseif cpp v.__length() #else __getField(v, "length") #end;
+				var l = #if (neko || flash || php || cs || java || python || hl || lua) v.length #elseif cpp v.__length() #else __getField(v, "length") #end;
 				for( i in 0...l ) {
 					if( v[i] == null )
 						ucount++;

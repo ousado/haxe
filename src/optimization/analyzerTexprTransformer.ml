@@ -457,6 +457,9 @@ let rec func ctx bb tf t p =
 		| TReturn None ->
 			add_cfg_edge bb bb_exit CFGGoto;
 			add_terminator bb e
+		| TReturn (Some e1) when ExtType.is_void (follow e1.etype) ->
+			let bb = block_element bb e1 in
+			block_element bb (mk (TReturn None) t_dynamic e.epos)
 		| TReturn (Some e1) ->
 			begin try
 				let mk_return e1 = mk (TReturn (Some e1)) t_dynamic e.epos in
@@ -668,7 +671,7 @@ and func ctx i =
 			let eo = Option.map loop eo in
 			let v' = get_var_origin ctx.graph v in
 			{e with eexpr = TVar(v',eo)}
-		| TBinop(OpAssign,e1,({eexpr = TBinop(op,e2,e3)} as e4)) ->
+		| TBinop(OpAssign,e1,({eexpr = TBinop(op,e2,e3)} as e4)) when target_handles_assign_ops ctx.com ->
 			let e1 = loop e1 in
 			let e2 = loop e2 in
 			let e3 = loop e3 in
@@ -683,8 +686,8 @@ and func ctx i =
 			begin match e1.eexpr,e2.eexpr with
 				| TLocal v1,TLocal v2 when v1 == v2 && is_valid_assign_op op ->
 					begin match op,e3.eexpr with
-						| OpAdd,TConst (TInt i32) when Int32.to_int i32 = 1 -> {e with eexpr = TUnop(Increment,Prefix,e1)}
-						| OpSub,TConst (TInt i32) when Int32.to_int i32 = 1 -> {e with eexpr = TUnop(Decrement,Prefix,e1)}
+						| OpAdd,TConst (TInt i32) when Int32.to_int i32 = 1 && target_handles_assign_ops ctx.com -> {e with eexpr = TUnop(Increment,Prefix,e1)}
+						| OpSub,TConst (TInt i32) when Int32.to_int i32 = 1 && target_handles_assign_ops ctx.com -> {e with eexpr = TUnop(Decrement,Prefix,e1)}
 						| _ -> {e with eexpr = TBinop(OpAssignOp op,e1,e3)}
 					end
 				| _ ->

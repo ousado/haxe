@@ -1729,8 +1729,9 @@ module LocalDce = struct
 			| _ ->
 				Type.iter expr e
 		in
-
+		let bb_marked = ref [] in
 		let rec mark bb =
+			bb_marked := bb :: !bb_marked;
 			DynArray.iter expr bb.bb_el;
 			DynArray.iter expr bb.bb_phi;
 			List.iter (fun edge ->
@@ -1753,9 +1754,9 @@ module LocalDce = struct
 			| _ ->
 				Type.map_expr sweep e
 		in
-		Graph.iter_dom_tree ctx.graph (fun bb ->
+		List.iter (fun bb ->
 			dynarray_map sweep bb.bb_el
-		);
+		) !bb_marked;
 end
 
 module Debug = struct
@@ -1882,7 +1883,7 @@ module Debug = struct
 	let dot_debug ctx c cf =
 		let g = ctx.graph in
 		let start_graph ?(graph_config=[]) suffix =
-			let ch = Codegen.create_file suffix [] ("dump" :: [Common.platform_name ctx.com.platform] @ (fst c.cl_path) @ [Printf.sprintf "%s.%s" (snd c.cl_path) cf.cf_name]) in
+			let ch = Codegen.Dump.create_file suffix [] ("dump" :: [Common.platform_name ctx.com.platform] @ (fst c.cl_path) @ [Printf.sprintf "%s.%s" (snd c.cl_path) cf.cf_name]) in
 			Printf.fprintf ch "digraph graphname {\n";
 			List.iter (fun s -> Printf.fprintf ch "%s;\n" s) graph_config;
 			ch,(fun () ->
@@ -1991,10 +1992,25 @@ module Run = struct
 		) ctx.graph.g_var_infos;
 		let e = with_timer "analyzer-fusion" (fun () -> Fusion.apply ctx.com ctx.config e) in
 		let e = with_timer "analyzer-cleanup" (fun () -> Cleanup.apply ctx.com e) in
+		let e = if ctx.is_real_function then
+			e
+		else begin
+			(* Get rid of the wrapping function and its return expressions. *)
+			let rec loop first e = match e.eexpr with
+				| TReturn (Some e) -> e
+				| TFunction tf when first -> loop false tf.tf_expr
+				| TFunction _ -> e
+				| _ -> Type.map_expr (loop first) e
+			in
+			loop true e
+		end in
 		e
 
 	let roundtrip com config e =
 		let ctx = there com config e in
+		Graph.infer_immediate_dominators ctx.graph;
+		Graph.infer_scopes ctx.graph;
+		Graph.infer_var_writes ctx.graph;
 		back_again ctx
 
 	let run_on_expr com config cfo e =
@@ -2030,18 +2046,6 @@ module Run = struct
 			let actx,e = run_on_expr ctx.Typecore.com config (Some(c,cf)) e in
 			let e = Cleanup.reduce_control_flow ctx e in
 			if config.dot_debug then Debug.dot_debug actx c cf;
-			let e = if actx.is_real_function then
-				e
-			else begin
-				(* Get rid of the wrapping function and its return expressions. *)
-				let rec loop first e = match e.eexpr with
-					| TReturn (Some e) -> e
-					| TFunction tf when first -> loop false tf.tf_expr
-					| TFunction _ -> e
-					| _ -> Type.map_expr (loop first) e
-				in
-				loop true e
-			end in
 			cf.cf_expr <- Some e;
 		| _ -> ()
 
@@ -2053,12 +2057,23 @@ module Run = struct
 		in
 		List.iter (process_field false) c.cl_ordered_fields;
 		List.iter (process_field true) c.cl_ordered_statics;
-		(match c.cl_constructor with
-		| None -> ()
-		| Some f -> process_field false f);
-		(match c.cl_init with
-		| None -> ()
-		| Some e -> c.cl_init <- Some (Codegen.VarCapturing.captured_vars ctx.Typecore.com e))
+		begin match c.cl_constructor with
+			| None -> ()
+			| Some f -> process_field false f;
+		end;
+		begin match c.cl_init with
+			| None ->
+				()
+			| Some e ->
+				let tf = { tf_args = []; tf_type = e.etype; tf_expr = e; } in
+				let e = roundtrip ctx.Typecore.com {config with optimize = false} (mk (TFunction tf) (tfun [] e.etype) e.epos) in
+				let e = match e.eexpr with
+					| TFunction tf -> tf.tf_expr
+					| _ -> assert false
+				in
+				let e = Codegen.VarCapturing.captured_vars ctx.Typecore.com e in
+				c.cl_init <- Some e
+		end
 
 	let run_on_type ctx config t =
 		match t with
@@ -2075,3 +2090,5 @@ module Run = struct
 		List.iter (run_on_type ctx config) types;
 		List.iter (fun cf -> cf.cf_meta <- List.filter (fun (m,_,_) -> m <> Meta.Pure) cf.cf_meta) cfl
 end
+;;
+Typecore.analyzer_run_on_expr_ref := (fun com e -> snd (Run.run_on_expr com (AnalyzerConfig.get_base_config com) None e))

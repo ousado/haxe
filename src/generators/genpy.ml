@@ -2344,7 +2344,10 @@ module Generator = struct
 				let import = match import_type with
 					| IModule module_name ->
 						(* importing whole module *)
-						"import " ^ module_name ^ " as " ^ class_name
+						if module_name = class_name then
+							"import " ^ module_name
+						else
+							"import " ^ module_name ^ " as " ^ class_name
 
 					| IObject (module_name,object_name) ->
 						if String.contains object_name '.' then
@@ -2352,7 +2355,10 @@ module Generator = struct
 							"import " ^ module_name ^ " as _hx_temp_import; " ^ class_name ^ " = _hx_temp_import." ^ object_name ^ "; del _hx_temp_import"
 						else
 							(* importing a class from a module *)
-							"from " ^ module_name ^ " import " ^ object_name ^ " as " ^ class_name
+							if object_name = class_name then
+								"from " ^ module_name ^ " import " ^ object_name
+							else
+								"from " ^ module_name ^ " import " ^ object_name ^ " as " ^ class_name
 				in
 				newline ctx;
 				if ignore_error then begin
@@ -2422,7 +2428,11 @@ module Generator = struct
 			| Some e ->
 				newline ctx;
 				newline ctx;
-				gen_expr ctx e "" ""
+				match e.eexpr with
+				| TBlock el ->
+					List.iter (fun e -> gen_expr ctx e "" ""; newline ctx) el
+				| _ ->
+					gen_expr ctx e "" ""
 
 	(* Entry point *)
 

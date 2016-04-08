@@ -78,7 +78,8 @@ let make_module ctx mpath file loadp =
 (*
 	Build module structure : should be atomic - no type loading is possible
 *)
-let module_pass_1 com m tdecls loadp =
+let module_pass_1 ctx m tdecls loadp =
+	let com = ctx.com in
 	let decls = ref [] in
 	let make_path name priv =
 		if List.exists (fun (t,_) -> snd (t_path t) = name) !decls then error ("Type name " ^ name ^ " is already defined in this module") loadp;
@@ -150,6 +151,12 @@ let module_pass_1 com m tdecls loadp =
 				t_type = mk_mono();
 				t_meta = d.d_meta;
 			} in
+			(* failsafe in case the typedef is not initialized (see #3933) *)
+			delay ctx PBuildModule (fun () ->
+				match t.t_type with
+				| TMono r -> (match !r with None -> r := Some com.basic.tvoid | _ -> ())
+				| _ -> ()
+			);
 			decls := (TTypeDecl t, decl) :: !decls;
 			acc
 		 | EAbstract d ->
@@ -198,7 +205,7 @@ let module_pass_1 com m tdecls loadp =
 				(match !decls with
 				| (TClassDecl c,_) :: _ ->
 					List.iter (fun m -> match m with
-						| ((Meta.Build | Meta.CoreApi | Meta.Allow | Meta.Access | Meta.Enum | Meta.Dce | Meta.Native | Meta.JsRequire | Meta.PythonImport | Meta.Expose | Meta.Deprecated | Meta.PhpConstants),_,_) ->
+						| ((Meta.Build | Meta.CoreApi | Meta.Allow | Meta.Access | Meta.Enum | Meta.Dce | Meta.Native | Meta.JsRequire | Meta.PythonImport | Meta.Expose | Meta.Deprecated | Meta.PhpConstants | Meta.PhpGlobal),_,_) ->
 							c.cl_meta <- m :: c.cl_meta;
 						| _ ->
 							()
@@ -2182,7 +2189,11 @@ module ClassInitializer = struct
 					cctx.context_init();
 					if ctx.com.verbose then Common.log ctx.com ("Typing " ^ (if ctx.in_macro then "macro " else "") ^ s_type_path c.cl_path ^ "." ^ cf.cf_name);
 					let e = type_var_field ctx t e fctx.is_static p in
-					let require_constant_expression e msg = match Optimizer.make_constant_expression ctx e with
+					let maybe_run_analyzer e = match e.eexpr with
+						| TConst _ | TLocal _ | TFunction _ -> e
+						| _ -> !analyzer_run_on_expr_ref ctx.com e
+					in
+					let require_constant_expression e msg = match Optimizer.make_constant_expression ctx (maybe_run_analyzer e) with
 						| Some e -> e
 						| None -> display_error ctx msg p; e
 					in
@@ -2199,7 +2210,7 @@ module ClassInitializer = struct
 						(* disallow initialization of non-physical fields (issue #1958) *)
 						display_error ctx "This field cannot be initialized because it is not a real variable" p; e
 					| Var v when not fctx.is_static ->
-						let e = match Optimizer.make_constant_expression ctx e with
+						let e = match Optimizer.make_constant_expression ctx (maybe_run_analyzer e) with
 							| Some e -> e
 							| None ->
 								let rec has_this e = match e.eexpr with
@@ -3191,13 +3202,19 @@ let init_module_type ctx context_init do_init (decl,p) =
 		check_global_metadata ctx (fun m -> t.t_meta <- m :: t.t_meta) t.t_module.m_path t.t_path None;
 		let ctx = { ctx with type_params = t.t_params } in
 		let tt = load_complex_type ctx p d.d_data in
-		(*
-			we exceptionnaly allow follow here because we don't care the type we get as long as it's not our own
-		*)
-		(match d.d_data with
-		| CTExtend _ -> ()
+		let tt = (match d.d_data with
+		| CTExtend _ -> tt
+		| CTPath { tpackage = ["haxe";"macro"]; tname = "MacroType" } ->
+			(* we need to follow MacroType immediately since it might define other module types that we will load afterwards *)
+			if t.t_type == follow tt then error "Recursive typedef is not allowed" p;
+			tt
 		| _ ->
-			if t.t_type == follow tt then error "Recursive typedef is not allowed" p);
+			TLazy (exc_protect ctx (fun r ->
+				if t.t_type == follow tt then error "Recursive typedef is not allowed" p;
+				r := (fun() -> tt);
+				tt
+			) "typedef_rec_check")
+		) in
 		(match t.t_type with
 		| TMono r ->
 			(match !r with
@@ -3290,7 +3307,7 @@ let module_pass_2 ctx m decls tdecls p =
 	Creates a module context for [m] and types [tdecls] using it.
 *)
 let type_types_into_module ctx m tdecls p =
-	let decls, tdecls = module_pass_1 ctx.com m tdecls p in
+	let decls, tdecls = module_pass_1 ctx m tdecls p in
 	let types = List.map fst decls in
 	List.iter (check_module_types ctx m p) types;
 	m.m_types <- m.m_types @ types;

@@ -272,7 +272,7 @@ class Context {
 	}
 
 	/**
-		Parses `expr` as haxe code, returning the corresponding AST.
+		Parses `expr` as Haxe code, returning the corresponding AST.
 
 		String interpolation of single quote strings within `expr` is not
 		supported.
@@ -333,6 +333,18 @@ class Context {
 	@:require(haxe_ver >= 3.1)
 	public static function onAfterGenerate( callback : Void -> Void ) {
 		load("after_generate",1)(callback);
+	}
+
+	/**
+		Adds a callback function `callback` which is invoked after the compiler
+		is done typing, but before optimization. The callback receives the types
+		which have been typed.
+
+		It is possible to define new types in the callback, in which case it
+		will be called again with the new types as argument.
+	**/
+	public static function onAfterTyping( callback : Array<haxe.macro.Type.ModuleType> -> Void ) {
+		load("after_typing",1)(callback);
 	}
 
 	/**
