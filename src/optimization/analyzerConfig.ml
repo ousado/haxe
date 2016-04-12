@@ -21,6 +21,11 @@ open Ast
 open Type
 open Common
 
+type debug_kind =
+	| DebugNone
+	| DebugDot
+	| DebugFull
+
 type t = {
 	optimize : bool;
 	const_propagation : bool;
@@ -31,7 +36,7 @@ type t = {
 	purity_inference : bool;
 	tail_call_elimination : bool;
 	tce_local : bool;
-	dot_debug : bool;
+	debug_kind : debug_kind;
 }
 
 let flag_const_propagation = "const_propagation"
@@ -44,6 +49,7 @@ let flag_ignore = "ignore"
 let flag_tail_call_elimination = "tce_strict"
 let flag_tce_local = "tce_local"
 let flag_dot_debug = "dot_debug"
+let flag_full_debug = "full_debug"
 
 let all_flags =
 	List.fold_left (fun acc flag ->
@@ -85,7 +91,7 @@ let get_base_config com =
 		purity_inference = not (Common.raw_defined com "analyzer-no-purity-inference");
 		tail_call_elimination = false;
 		tce_local = false;
-		dot_debug = false;
+		debug_kind = DebugNone;
 	}
 
 let update_config_from_meta com config meta =
@@ -106,7 +112,8 @@ let update_config_from_meta com config meta =
 				| EConst (Ident s) when s = flag_purity_inference -> { config with purity_inference = true}
 				| EConst (Ident s) when s = flag_tail_call_elimination -> { config with tail_call_elimination = true}
 				| EConst (Ident s) when s = flag_tce_local -> { config with tce_local = true}
-				| EConst (Ident s) when s = flag_dot_debug -> {config with dot_debug = true}
+				| EConst (Ident s) when s = flag_dot_debug -> {config with debug_kind = DebugDot}
+				| EConst (Ident s) when s = flag_full_debug -> {config with debug_kind = DebugFull}
 				| _ ->
 					let s = Ast.s_expr e in
 					com.warning (StringError.string_error s all_flags ("Unrecognized analyzer option: " ^ s)) (pos e);

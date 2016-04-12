@@ -74,7 +74,7 @@ let s_path ctx = dot_path
 let kwds =
 	let h = Hashtbl.create 0 in
 	List.iter (fun s -> Hashtbl.add h s ()) [
-	    ""; "and"; "break"; "do"; "else"; "elseif";
+	    "_G"; ""; "and"; "break"; "do"; "else"; "elseif";
 	    "end"; "false"; "for"; "function"; "if";
 	    "in"; "local"; "nil"; "not"; "or"; "repeat";
 	    "return"; "then"; "true"; "until"; "while";
@@ -468,9 +468,9 @@ and gen_expr ?(local=true) ctx e = begin
 			gen_value ctx x;
 			print ctx "%s)" (field f.cf_name)
 		| _ ->
-			print ctx "(__=";
+			print ctx "(function() local __=";
 			gen_value ctx x;
-			print ctx ",_hx_bind(__,__%s))" (field f.cf_name))
+			print ctx "; return _hx_bind(__,__%s) end)()" (field f.cf_name))
 	| TEnumParameter (x,_,i) ->
 		gen_value ctx x;
 		print ctx "[%i]" (i + 2)
