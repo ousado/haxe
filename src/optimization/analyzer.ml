@@ -901,7 +901,7 @@ module TCE = struct
 	let dopsid s id = print_endline (Printf.sprintf "%s id: %d " s id)
 	let p_s_id s id = if debug then dopsid s id
 
-	(* TODO migrate into Graph ? *)
+	(* TODO cleanup, migrate into Graph perhaps *)
 
 	let iter_dom_sub_tree bb_start bb_term f =
 		let rec loop bb =
@@ -1561,7 +1561,7 @@ module TCE = struct
 		let flat = loop_func bb_entry [] [] in
 		let s_bbids bbs = (String.concat "," (List.map ( fun bb -> string_of_int bb.bb_id ) bbs )) in
 
-		let mode_vars_m = PMap.empty in
+		let mode_vars_m = PMap.empty in (* mode_vars_m is a (bb_function_begin.bb_id, (tce_mode * tvar list)) PMap - the tvars are the locals this function is assigned to *)
 		let (mode_vars_m,fdata_m) = List.fold_left (fun (mode_vars_m, acc_m) (p,fs,bs) ->
 			(*print_endline (Printf.sprintf "p: %d cs: %s blocks: [%s] " p.bb_id (s_bbids fs) (s_bbids bs) );*)
 			let caps_m = PMap.empty in
