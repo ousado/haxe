@@ -221,16 +221,24 @@ let module_pass_1 ctx m tdecls loadp =
 	let decls = List.rev !decls in
 	decls, List.rev tdecls
 
-let parse_file com file p =
-	let ch = (try open_in_bin file with _ -> error ("Could not open " ^ file) p) in
+let parse_file_from_lexbuf com file p lexbuf =
 	let t = Common.timer "parsing" in
 	Lexer.init file true;
 	incr stats.s_files_parsed;
-	let data = (try Parser.parse com (Lexing.from_channel ch) with e -> close_in ch; t(); raise e) in
-	close_in ch;
+	let data = (try Parser.parse com lexbuf with e -> t(); raise e) in
+	if com.display = DMDocumentSymbols && Common.unique_full_path file = (!Parser.resume_display).pfile then
+		raise (Display.DocumentSymbols(Display.print_document_symbols data));
 	t();
 	Common.log com ("Parsed " ^ file);
 	data
+
+let parse_file_from_string com file p string =
+	parse_file_from_lexbuf com file p (Lexing.from_string string)
+
+let parse_file com file p =
+	let use_stdin = (Common.defined com Define.DisplayStdin) && (Common.unique_full_path file) = !Parser.resume_display.pfile in
+	let ch = if use_stdin then stdin else (try open_in_bin file with _ -> error ("Could not open " ^ file) p) in
+	Std.finally (fun() -> close_in ch) (parse_file_from_lexbuf com file p) (Lexing.from_channel ch)
 
 let parse_hook = ref parse_file
 let type_module_hook = ref (fun _ _ _ -> None)
@@ -1237,12 +1245,12 @@ let add_constructor ctx c force_constructor p =
 					| TFun (args,_) ->
 						List.map (fun (n,o,t) ->
 							let def = try type_function_arg_value ctx t (Some (PMap.find n values)) with Not_found -> if o then Some TNull else None in
-							map_arg (alloc_var n (if o then ctx.t.tnull t else t),def)
+							map_arg (alloc_var n (if o then ctx.t.tnull t else t) p,def) (* TODO: var pos *)
 						) args
 					| _ -> assert false
 			) in
 			let p = c.cl_pos in
-			let vars = List.map (fun (v,def) -> alloc_var v.v_name (apply_params csup.cl_params cparams v.v_type), def) args in
+			let vars = List.map (fun (v,def) -> alloc_var v.v_name (apply_params csup.cl_params cparams v.v_type) v.v_pos, def) args in
 			let super_call = mk (TCall (mk (TConst TSuper) (TInst (csup,cparams)) p,List.map (fun (v,_) -> mk (TLocal v) v.v_type p) vars)) ctx.t.tvoid p in
 			let constr = mk (TFunction {
 				tf_args = vars;
@@ -1283,7 +1291,7 @@ let check_struct_init_constructor ctx c p = match c.cl_constructor with
 			| Var _ ->
 				let opt = Meta.has Meta.Optional cf.cf_meta in
 				let t = if opt then ctx.t.tnull cf.cf_type else cf.cf_type in
-				let v = alloc_var cf.cf_name t in
+				let v = alloc_var cf.cf_name t p in
 				let ef = mk (TField(ethis,FInstance(c,params,cf))) t p in
 				let ev = mk (TLocal v) v.v_type p in
 				let e = mk (TBinop(OpAssign,ef,ev)) ev.etype p in
@@ -1522,74 +1530,12 @@ let type_function_params ctx fd fname p =
 	params := type_type_params ctx ([],fname) (fun() -> !params) p fd.f_params;
 	!params
 
-let find_enclosing com e =
-	let display_pos = ref (!Parser.resume_display) in
-	let mk_null p = (EDisplay(((EConst(Ident "null")),p),false),p) in
-	let encloses_display_pos p =
-		if p.pmin <= !display_pos.pmin && p.pmax >= !display_pos.pmax then begin
-			let p = !display_pos in
-			display_pos := { pfile = ""; pmin = -2; pmax = -2 };
-			Some p
-		end else
-			None
-	in
-	let rec loop e = match fst e with
-		| EBlock el ->
-			let p = pos e in
-			(* We want to find the innermost block which contains the display position. *)
-			let el = List.map loop el in
-			let el = match encloses_display_pos p with
-				| None ->
-					el
-				| Some p2 ->
-					let b,el = List.fold_left (fun (b,el) e ->
-						let p = pos e in
-						if b || p.pmax <= p2.pmin then begin
-							(b,e :: el)
-						end else begin
-							let e_d = (EDisplay(mk_null p,false)),p in
-							(true,e :: e_d :: el)
-						end
-					) (false,[]) el in
-					let el = if b then
-						el
-					else begin
-						mk_null p :: el
-					end in
-					List.rev el
-			in
-			(EBlock el),(pos e)
-		| _ ->
-			Ast.map_expr loop e
-	in
-	loop e
-
-let find_before_pos com e =
-	let display_pos = ref (!Parser.resume_display) in
-	let is_annotated p =
-		if p.pmax = !display_pos.pmin - 1 then begin
-			display_pos := { pfile = ""; pmin = -2; pmax = -2 };
-			true
-		end else
-			false
-	in
-	let rec loop e =
-		if is_annotated (pos e) then
-			(EDisplay(e,false),(pos e))
-		else
-			e
-	in
-	let rec map e =
-		loop (Ast.map_expr map e)
-	in
-	map e
-
 let type_function ctx args ret fmode f do_display p =
 	let locals = save_locals ctx in
 	let fargs = List.map (fun (n,c,t) ->
 		if n.[0] = '$' then error "Function argument names starting with a dollar are not allowed" p;
 		let c = type_function_arg_value ctx t c in
-		let v,c = add_local ctx n t, c in
+		let v,c = add_local ctx n t p, c in (* TODO: var pos *)
 		if n = "this" then v.v_meta <- (Meta.This,[],p) :: v.v_meta;
 		v,c
 	) args in
@@ -1604,8 +1550,8 @@ let type_function ctx args ret fmode f do_display p =
 		type_expr ctx e NoValue
 	else begin
 		let e = match ctx.com.display with
-			| DMToplevel -> find_enclosing ctx.com e
-			| DMPosition | DMUsage | DMType -> find_before_pos ctx.com e
+			| DMToplevel -> Display.find_enclosing ctx.com e
+			| DMPosition | DMUsage | DMType -> Display.find_before_pos ctx.com e
 			| _ -> e
 		in
 		try
@@ -1614,8 +1560,8 @@ let type_function ctx args ret fmode f do_display p =
 		with
 		| Parser.TypePath (_,None,_) | Exit ->
 			type_expr ctx e NoValue
-		| DisplayTypes [t] when (match follow t with TMono _ -> true | _ -> false) ->
-			type_expr ctx (if ctx.com.display = DMToplevel then find_enclosing ctx.com e else e) NoValue
+		| Display.DisplayTypes [t] when (match follow t with TMono _ -> true | _ -> false) ->
+			type_expr ctx (if ctx.com.display = DMToplevel then Display.find_enclosing ctx.com e else e) NoValue
 	end in
 	let e = match e.eexpr with
 		| TMeta((Meta.MergeBlock,_,_), ({eexpr = TBlock el} as e1)) -> e1
@@ -1908,6 +1854,15 @@ let build_module_def ctx mt meta fvars context_init fbuild =
 	List.iter (fun f -> f()) (List.rev f_build);
 	(match f_enum with None -> () | Some f -> f())
 
+let is_display_file ctx p = match ctx.com.display with
+	| DMNone -> false
+	| DMResolve s ->
+		let mt = load_type_def ctx p {tname = s; tpackage = []; tsub = None; tparams = []} in
+		let p = (t_infos mt).mt_pos in
+		raise (Display.DisplayPosition [p]);
+	| _ ->
+		Display.is_display_file p
+
 module ClassInitializer = struct
 	type class_init_ctx = {
 		tclass : tclass; (* I don't trust ctx.curclass because it's mutable. *)
@@ -1935,6 +1890,7 @@ module ClassInitializer = struct
 		is_extern : bool;
 		is_macro : bool;
 		is_abstract_member : bool;
+		is_display_field : bool;
 		field_kind : field_kind;
 		mutable do_bind : bool;
 		mutable do_add : bool;
@@ -1976,15 +1932,7 @@ module ClassInitializer = struct
 			| None -> false
 			| Some (c,_) -> extends_public c
 		in
-		let is_display_file = match ctx.com.display with
-			| DMNone -> false
-			| DMResolve s ->
-				let mt = load_type_def ctx p {tname = s; tpackage = []; tsub = None; tparams = []} in
-				let p = (t_infos mt).mt_pos in
-				raise (DisplayPosition [p]);
-			| _ ->
-				Common.unique_full_path p.pfile = (!Parser.resume_display).pfile
-		in
+		let is_display_file = is_display_file ctx p in
 		let cctx = {
 			tclass = c;
 			is_lib = is_lib;
@@ -2025,6 +1973,7 @@ module ClassInitializer = struct
 			is_override = is_override;
 			is_macro = is_macro;
 			is_extern = is_extern;
+			is_display_field = cctx.is_display_file && Display.encloses_position cctx.completion_position cff.cff_pos;
 			is_abstract_member = cctx.abstract <> None && Meta.has Meta.Impl cff.cff_meta;
 			field_kind = field_kind;
 			do_bind = (((not c.cl_extern || is_inline) && not c.cl_interface) || field_kind = FKInit);
@@ -2113,9 +2062,17 @@ module ClassInitializer = struct
 			| TMono r -> (match !r with None -> false | Some t -> is_full_type t)
 			| TAbstract _ | TInst _ | TEnum _ | TLazy _ | TDynamic _ | TAnon _ | TType _ -> true
 		in
-		if ctx.com.display <> DMNone then begin
-			let cp = !Parser.resume_display in
-			if cctx.is_display_file && (cp.pmin = 0 || (p.pmin <= cp.pmin && p.pmax >= cp.pmax)) then begin
+		match ctx.com.display with
+			| DMNone | DMUsage ->
+				if fctx.is_macro && not ctx.in_macro then
+					()
+				else begin
+					cf.cf_type <- TLazy r;
+					(* is_lib ? *)
+					cctx.delayed_expr <- (ctx,Some r) :: cctx.delayed_expr;
+				end
+			| _ ->
+			if fctx.is_display_field then begin
 				if fctx.is_macro && not ctx.in_macro then
 					(* force macro system loading of this class in order to get completion *)
 					delay ctx PTypeField (fun() -> ignore(ctx.g.do_macro ctx MExpr c.cl_path cf.cf_name [] p))
@@ -2129,12 +2086,16 @@ module ClassInitializer = struct
 					cf.cf_type <- TLazy r;
 				end;
 			end
-		end else if fctx.is_macro && not ctx.in_macro then
-			()
-		else begin
-			cf.cf_type <- TLazy r;
-			(* is_lib ? *)
-			cctx.delayed_expr <- (ctx,Some r) :: cctx.delayed_expr;
+
+	let check_display (ctx,fctx) cf p =
+		if fctx.is_display_field && not ctx.display_handled then begin
+			(* We're in our display field but didn't exit yet, so the position must be on the field itself.
+			   It could also be one of its arguments, but at the moment we cannot detect that. *)
+		match ctx.com.display with
+			| DMPosition -> raise (Display.DisplayPosition [cf.cf_pos]);
+			| DMUsage -> cf.cf_meta <- (Meta.Usage,[],p) :: cf.cf_meta;
+			| DMType -> raise (Display.DisplayTypes [cf.cf_type])
+			| _ -> ()
 		end
 
 	let bind_var (ctx,cctx,fctx) cf e =
@@ -2167,7 +2128,8 @@ module ClassInitializer = struct
 		let t = cf.cf_type in
 
 		match e with
-		| None -> ()
+		| None ->
+			check_display (ctx,fctx) cf p
 		| Some e ->
 			if requires_value_meta ctx.com (Some c) then cf.cf_meta <- ((Meta.Value,[e],cf.cf_pos) :: cf.cf_meta);
 			let check_cast e =
@@ -2193,7 +2155,10 @@ module ClassInitializer = struct
 						| TConst _ | TLocal _ | TFunction _ -> e
 						| _ -> !analyzer_run_on_expr_ref ctx.com e
 					in
-					let require_constant_expression e msg = match Optimizer.make_constant_expression ctx (maybe_run_analyzer e) with
+					let require_constant_expression e msg =
+						if ctx.com.display <> DMNone then
+							e
+						else match Optimizer.make_constant_expression ctx (maybe_run_analyzer e) with
 						| Some e -> e
 						| None -> display_error ctx msg p; e
 					in
@@ -2242,6 +2207,7 @@ module ClassInitializer = struct
 						e
 					) in
 					let e = check_cast e in
+					check_display (ctx,fctx) cf p;
 					cf.cf_expr <- Some e;
 					cf.cf_type <- t;
 				end;
@@ -2526,7 +2492,6 @@ module ClassInitializer = struct
 					| None ->
 						if fctx.field_kind = FKConstructor then FunConstructor else if fctx.is_static then FunStatic else FunMember
 				) in
-				let is_display_field = cctx.is_display_file && (f.cff_pos.pmin <= cctx.completion_position.pmin && f.cff_pos.pmax >= cctx.completion_position.pmax) in
 				match ctx.com.platform with
 					| Java when is_java_native_function cf.cf_meta ->
 						if fd.f_expr <> None then
@@ -2534,7 +2499,8 @@ module ClassInitializer = struct
 						cf.cf_expr <- None;
 						cf.cf_type <- t
 					| _ ->
-						let e , fargs = type_function ctx args ret fmode fd is_display_field p in
+						let e , fargs = type_function ctx args ret fmode fd fctx.is_display_field p in
+						check_display (ctx,fctx) cf p;
 						let tf = {
 							tf_args = fargs;
 							tf_type = ret;
@@ -3120,6 +3086,7 @@ let init_module_type ctx context_init do_init (decl,p) =
 		let index = ref 0 in
 		let is_flat = ref true in
 		let fields = ref PMap.empty in
+		let is_display_file = is_display_file ctx p in
 		List.iter (fun c ->
 			let p = c.ec_pos in
 			let params = ref [] in
@@ -3167,13 +3134,19 @@ let init_module_type ctx context_init do_init (decl,p) =
 					| TFun _ -> Method MethNormal
 					| _ -> Var { v_read = AccNormal; v_write = AccNo }
 				);
-				cf_pos = e.e_pos;
+				cf_pos = p;
 				cf_doc = f.ef_doc;
 				cf_meta = no_meta;
 				cf_expr = None;
 				cf_params = f.ef_params;
 				cf_overloads = [];
 			} in
+			if is_display_file && Display.encloses_position !Parser.resume_display p then begin match ctx.com.display with
+				| DMPosition -> raise (Display.DisplayPosition [p]);
+				| DMUsage -> f.ef_meta <- (Meta.Usage,[],p) :: f.ef_meta;
+				| DMType -> raise (Display.DisplayTypes [f.ef_type])
+				| _ -> ()
+			end;
 			e.e_constrs <- PMap.add f.ef_name f e.e_constrs;
 			fields := PMap.add cf.cf_name cf !fields;
 			incr index;
@@ -3341,6 +3314,7 @@ let type_types_into_module ctx m tdecls p =
 		untyped = false;
 		in_macro = ctx.in_macro;
 		in_display = false;
+		display_handled = false;
 		in_loop = false;
 		opened = [];
 		in_call_args = false;
@@ -3675,7 +3649,7 @@ let generic_substitute_expr gctx e =
 		try
 			Hashtbl.find vars v.v_id
 		with Not_found ->
-			let v2 = alloc_var v.v_name (generic_substitute_type gctx v.v_type) in
+			let v2 = alloc_var v.v_name (generic_substitute_type gctx v.v_type) v.v_pos in
 			v2.v_meta <- v.v_meta;
 			Hashtbl.add vars v.v_id v2;
 			v2
@@ -3738,7 +3712,7 @@ let rec build_generic ctx c p tl =
 			()
 	in
 	List.iter check_recursive tl;
-	if !recurse then begin
+	if !recurse || ctx.com.display <> DMNone then begin
 		TInst (c,tl) (* build a normal instance *)
 	end else begin
 	let gctx = make_generic ctx c.cl_params tl p in

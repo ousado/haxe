@@ -176,7 +176,7 @@ module Pattern = struct
 				pctx.current_locals <- PMap.add name (v,p) pctx.current_locals;
 				v
 			| _ ->
-				let v = alloc_var name t in
+				let v = alloc_var name t (pos e) in
 				pctx.current_locals <- PMap.add name (v,(pos e)) pctx.current_locals;
 				ctx.locals <- PMap.add name v ctx.locals;
 				v
@@ -279,6 +279,7 @@ module Pattern = struct
 				let v = add_local s in
 				PatVariable v
 			| ECall(e1,el) ->
+				let t = tfun (List.map (fun _ -> mk_mono()) el) t in
 				let e1 = type_expr ctx e1 (WithType t) in
 				begin match e1.eexpr,follow e1.etype with
 					| TField(_, FEnum(en,ef)),TFun(_,TEnum(_,tl)) ->
@@ -343,24 +344,32 @@ module Pattern = struct
 						fail()
 				end
 			| EObjectDecl fl ->
-				let known_fields,map = match follow t with
+				let known_fields = match follow t with
 					| TAnon an ->
-						an.a_fields,(fun t -> t)
-					| TInst(c,tl) -> c.cl_fields,apply_params c.cl_params tl
+						PMap.fold (fun cf acc -> (cf,cf.cf_type) :: acc) an.a_fields []
+					| TInst(c,tl) ->
+						let rec loop fields c tl =
+							let fields = List.fold_left (fun acc cf -> (cf,apply_params c.cl_params tl cf.cf_type) :: acc) fields c.cl_ordered_fields in
+							match c.cl_super with
+								| None -> fields
+								| Some (csup,tlsup) -> loop fields csup (List.map (apply_params c.cl_params tl) tlsup)
+						in
+						loop [] c tl
 					| TAbstract({a_impl = Some c} as a,tl) ->
 						let fields = List.fold_left (fun acc cf ->
 							if Meta.has Meta.Impl cf.cf_meta then
-								PMap.add cf.cf_name cf acc
-							else acc
-						) PMap.empty c.cl_ordered_statics in
-						fields,apply_params a.a_params tl
-					| _ -> error (Printf.sprintf "Cannot field-match against %s" (s_type t)) (pos e)
+								(cf,apply_params a.a_params tl cf.cf_type) :: acc
+							else
+								acc
+						) [] c.cl_ordered_statics in
+						fields
+					| _ ->
+						error (Printf.sprintf "Cannot field-match against %s" (s_type t)) (pos e)
 				in
 				let is_matchable cf =
 					match cf.cf_kind with Method _ -> false | _ -> true
 				in
-				let patterns,fields = PMap.fold (fun cf (patterns,fields) ->
-					let t = map cf.cf_type in
+				let patterns,fields = List.fold_left (fun (patterns,fields) (cf,t) ->
 					try
 						if pctx.in_reification && cf.cf_name = "pos" then raise Not_found;
 						let e1 = List.assoc cf.cf_name fl in
@@ -370,8 +379,8 @@ module Pattern = struct
 							(PatAny,cf.cf_pos) :: patterns,cf.cf_name :: fields
 						else
 							patterns,fields
-				) known_fields ([],[]) in
-				(* List.iter (fun (s,e) -> if not (List.mem s fields) then error (Printf.sprintf "%s has no field %s" (s_type t) s) (pos e)) fl; *)
+				) ([],[]) known_fields in
+				List.iter (fun (s,e) -> if not (List.mem s fields) then error (Printf.sprintf "%s has no field %s" (s_type t) s) (pos e)) fl;
 				PatConstructor(ConFields fields,patterns)
 			| EBinop(OpOr,e1,e2) ->
 				let pctx1 = {pctx with current_locals = PMap.empty} in
@@ -393,6 +402,9 @@ module Pattern = struct
 				v.v_name <- "tmp";
 				let pat = make pctx e1.etype e2 in
 				PatExtractor(v,e1,pat)
+			| EDisplay(e,call) ->
+				let _ = Typer.handle_display ctx e call (WithType t) p in
+				fail()
 			| _ ->
 				fail()
 		in
@@ -1016,7 +1028,7 @@ module Compile = struct
 					let v,_,_ = List.find (fun (_,_,e2) -> Texpr.equal e1 e2) ex_bindings in
 					v,ex_bindings
 				with Not_found ->
-					let v = alloc_var "_hx_tmp" e1.etype in
+					let v = alloc_var "_hx_tmp" e1.etype e1.epos in
 					v,(v,e1.epos,e1) :: ex_bindings
 				in
 				let ev = mk (TLocal v) v.v_type e1.epos in
@@ -1042,7 +1054,7 @@ module Compile = struct
 			| TConst _ | TLocal _ ->
 				(e :: subjects,vars)
 			| _ ->
-				let v = gen_local ctx e.etype in
+				let v = gen_local ctx e.etype e.epos in
 				let ev = mk (TLocal v) e.etype e.epos in
 				(ev :: subjects,(v,e.epos,e) :: vars)
 		) ([],[]) subjects in

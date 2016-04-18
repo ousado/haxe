@@ -641,6 +641,8 @@ let s_token = function
 	| At -> "@"
 	| Dollar v -> "$" ^ v
 
+exception Invalid_escape_sequence of char * int
+
 let unescape s =
 	let b = Buffer.create 0 in
 	let rec loop esc i =
@@ -648,6 +650,7 @@ let unescape s =
 			()
 		else
 			let c = s.[i] in
+			let fail () = raise (Invalid_escape_sequence(c,i)) in
 			if esc then begin
 				let inext = ref (i + 1) in
 				(match c with
@@ -656,11 +659,11 @@ let unescape s =
 				| 't' -> Buffer.add_char b '\t'
 				| '"' | '\'' | '\\' -> Buffer.add_char b c
 				| '0'..'3' ->
-					let c = (try char_of_int (int_of_string ("0o" ^ String.sub s i 3)) with _ -> raise Exit) in
+					let c = (try char_of_int (int_of_string ("0o" ^ String.sub s i 3)) with _ -> fail()) in
 					Buffer.add_char b c;
 					inext := !inext + 2;
 				| 'x' ->
-					let c = (try char_of_int (int_of_string ("0x" ^ String.sub s (i+1) 2)) with _ -> raise Exit) in
+					let c = (try char_of_int (int_of_string ("0x" ^ String.sub s (i+1) 2)) with _ -> fail()) in
 					Buffer.add_char b c;
 					inext := !inext + 2;
 				| 'u' ->
@@ -674,14 +677,14 @@ let unescape s =
 							assert (u <= 0x10FFFF);
 							(u, l+2)
 						with _ ->
-							raise Exit
+							fail()
 					in
 					let ub = UTF8.Buf.create 0 in
 					UTF8.Buf.add_char ub (UChar.uchar_of_int u);
 					Buffer.add_string b (UTF8.Buf.contents ub);
 					inext := !inext + a;
 				| _ ->
-					raise Exit);
+					fail());
 				loop false !inext;
 			end else
 				match c with
@@ -692,7 +695,6 @@ let unescape s =
 	in
 	loop false 0;
 	Buffer.contents b
-
 
 let map_expr loop (e,p) =
 	let opt f o =
@@ -758,6 +760,34 @@ let map_expr loop (e,p) =
 	| EMeta (m,e) -> EMeta(m, loop e)
 	) in
 	(e,p)
+
+let iter_expr loop (e,p) =
+	let opt eo = match eo with None -> () | Some e -> loop e in
+	let exprs = List.iter loop in
+	match e with
+	| EConst _ | EContinue | EBreak | EDisplayNew _ | EReturn None -> ()
+	| EParenthesis e1 | EField(e1,_) | EUnop(_,_,e1) | EReturn(Some e1) | EThrow e1 | EMeta(_,e1)
+	| ECheckType(e1,_) | EDisplay(e1,_) | ECast(e1,_) | EUntyped e1 -> loop e1;
+	| EArray(e1,e2) | EBinop(_,e1,e2) | EIn(e1,e2) | EFor(e1,e2) | EWhile(e1,e2,_) | EIf(e1,e2,None) -> loop e1; loop e2;
+	| ETernary(e1,e2,e3) | EIf(e1,e2,Some e3) -> loop e1; loop e2; loop e3;
+	| EArrayDecl el | ENew(_,el) | EBlock el -> List.iter loop el
+	| ECall(e1,el) -> loop e1; exprs el;
+	| EObjectDecl fl -> List.iter (fun (_,e) -> loop e) fl;
+	| ETry(e1,catches) ->
+		loop e1;
+		List.iter (fun (_,_,e) -> loop e) catches
+	| ESwitch(e1,cases,def) ->
+		loop e1;
+		List.iter (fun (el,eg,e) ->
+			exprs el;
+			opt eg;
+			opt e;
+		) cases;
+		(match def with None -> () | Some e -> opt e);
+	| EFunction(_,f) ->
+		List.iter (fun (_,_,_,eo) -> opt eo) f.f_args;
+		opt f.f_expr
+	| EVars vl -> List.iter (fun (_,_,eo) -> opt eo) vl
 
 let s_expr e =
 	let rec s_expr_inner tabs (e,_) =

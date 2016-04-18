@@ -108,6 +108,7 @@ and typer = {
 	mutable untyped : bool;
 	mutable in_loop : bool;
 	mutable in_display : bool;
+	mutable display_handled : bool;
 	mutable in_macro : bool;
 	mutable macro_depth : int;
 	mutable curfun : current_fun;
@@ -140,10 +141,6 @@ exception Fatal_error of string * Ast.pos
 exception Forbid_package of (string * path * pos) * pos list * string
 
 exception Error of error_msg * pos
-
-exception DisplayTypes of t list
-
-exception DisplayPosition of Ast.pos list
 
 exception WithTypeError of unify_error list * pos
 
@@ -288,14 +285,14 @@ let save_locals ctx =
 	let locals = ctx.locals in
 	(fun() -> ctx.locals <- locals)
 
-let add_local ctx n t =
-	let v = alloc_var n t in
+let add_local ctx n t p =
+	let v = alloc_var n t p in
 	ctx.locals <- PMap.add n v ctx.locals;
 	v
 
 let gen_local_prefix = "`"
 
-let gen_local ctx t =
+let gen_local ctx t p =
 	(* ensure that our generated local does not mask an existing one *)
 	let rec loop n =
 		let nv = (if n = 0 then gen_local_prefix else gen_local_prefix ^ string_of_int n) in
@@ -304,7 +301,7 @@ let gen_local ctx t =
 		else
 			nv
 	in
-	add_local ctx (loop 0) t
+	add_local ctx (loop 0) t p
 
 let is_gen_local v =
 	String.unsafe_get v.v_name 0 = String.unsafe_get gen_local_prefix 0

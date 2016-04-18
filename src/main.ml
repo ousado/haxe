@@ -621,7 +621,7 @@ let default_flush ctx =
 
 let create_context params =
 	let ctx = {
-		com = Common.create version params;
+		com = Common.create version s_version params;
 		flush = (fun()->());
 		setup = (fun()->());
 		messages = [];
@@ -700,21 +700,28 @@ and wait_loop boot_com host port =
 	} in
 	global_cache := Some cache;
 	Typer.macro_enable_cache := true;
+	let current_stdin = ref None in
 	Typeload.parse_hook := (fun com2 file p ->
-		let sign = get_signature com2 in
 		let ffile = Common.unique_full_path file in
-		let ftime = file_time ffile in
-		let fkey = ffile ^ "!" ^ sign in
-		try
-			let time, data = Hashtbl.find cache.c_files fkey in
-			if time <> ftime then raise Not_found;
-			data
-		with Not_found ->
-			has_parse_error := false;
-			let data = Typeload.parse_file com2 file p in
-			if verbose then print_endline ("Parsed " ^ ffile);
-			if not !has_parse_error && ffile <> (!Parser.resume_display).Ast.pfile then Hashtbl.replace cache.c_files fkey (ftime,data);
-			data
+		let is_display_file = ffile = (!Parser.resume_display).Ast.pfile in
+
+		match is_display_file, !current_stdin with
+		| true, Some stdin when Common.defined com2 Define.DisplayStdin ->
+			Typeload.parse_file_from_string com2 file p stdin
+		| _ ->
+			let sign = get_signature com2 in
+			let ftime = file_time ffile in
+			let fkey = ffile ^ "!" ^ sign in
+			try
+				let time, data = Hashtbl.find cache.c_files fkey in
+				if time <> ftime then raise Not_found;
+				data
+			with Not_found ->
+				has_parse_error := false;
+				let data = Typeload.parse_file com2 file p in
+				if verbose then print_endline ("Parsed " ^ ffile);
+				if not !has_parse_error && (not is_display_file) then Hashtbl.replace cache.c_files fkey (ftime,data);
+				data
 	);
 	let cache_module m =
 		Hashtbl.replace cache.c_modules (m.m_path,m.m_extra.m_sign) m;
@@ -850,11 +857,14 @@ and wait_loop boot_com host port =
 			if r > 0 && tmp.[r-1] = '\000' then
 				Buffer.sub b 0 (Buffer.length b - 1)
 			else begin
-				if r = 0 then ignore(Unix.select [] [] [] 0.05); (* wait a bit *)
-				if count = 100 then
-					failwith "Aborting unactive connection"
-				else
-					read_loop (count + 1);
+				if r = 0 then begin
+					ignore(Unix.select [] [] [] 0.05); (* wait a bit *)
+					if count = 100 then
+						failwith "Aborting inactive connection"
+					else
+						read_loop (count + 1);
+				end else
+					read_loop 0;
 			end;
 		in
 		let rec cache_context com =
@@ -894,7 +904,16 @@ and wait_loop boot_com host port =
 			ctx
 		in
 		(try
-			let data = parse_hxml_data (read_loop 0) in
+			let s = (read_loop 0) in
+			let hxml =
+				try
+					let idx = String.index s '\001' in
+					current_stdin := Some (String.sub s (idx + 1) ((String.length s) - idx - 1));
+					(String.sub s 0 idx)
+				with Not_found ->
+					s
+			in
+			let data = parse_hxml_data hxml in
 			Unix.clear_nonblock sin;
 			if verbose then print_endline ("Processing Arguments [" ^ String.concat "," data ^ "]");
 			(try
@@ -934,6 +953,7 @@ and wait_loop boot_com host port =
 			(try ssend sin estr with _ -> ());
 		);
 		Unix.close sin;
+		current_stdin := None;
 		(* prevent too much fragmentation by doing some compactions every X run *)
 		incr run_count;
 		if !run_count mod 10 = 0 then begin
@@ -1256,6 +1276,9 @@ try
 					| "toplevel" ->
 						activate_special_display_mode();
 						DMToplevel
+					| "document-symbols" ->
+						Common.define com Define.NoCOpt;
+						DMDocumentSymbols;
 					| "" ->
 						Parser.use_parser_resume := true;
 						DMDefault
@@ -1421,7 +1444,7 @@ try
 		com.error <- error ctx;
 		com.main_class <- None;
 		let real = get_real_path (!Parser.resume_display).Ast.pfile in
-		classes := lookup_classes com real;
+		classes := lookup_classes com real @ (if com.display = DMUsage then !classes else []);
 		if !classes = [] then begin
 			if not (Sys.file_exists real) then failwith "Display file does not exist";
 			(match List.rev (ExtString.String.nsplit real path_sep) with
@@ -1546,7 +1569,7 @@ try
 		t();
 		if ctx.has_error then raise Abort;
 		begin match com.display with
-			| DMNone | DMUsage | DMPosition | DMType | DMResolve _ ->
+			| DMNone | DMUsage ->
 				()
 			| _ ->
 				if ctx.has_next then raise Abort;
@@ -1557,6 +1580,10 @@ try
 		com.main <- main;
 		com.types <- types;
 		com.modules <- modules;
+		begin match com.display with
+			| DMUsage -> Codegen.detect_usage com;
+			| _ -> ()
+		end;
 		Filters.run com tctx main;
 		if ctx.has_error then raise Abort;
 		(* check file extension. In case of wrong commandline, we don't want
@@ -1683,7 +1710,7 @@ with
 			fields
 		in
 		complete_fields com fields
-	| Typecore.DisplayTypes tl ->
+	| Display.DisplayTypes tl ->
 		let ctx = print_context() in
 		let b = Buffer.create 0 in
 		List.iter (fun t ->
@@ -1692,7 +1719,7 @@ with
 			Buffer.add_string b "\n</type>\n";
 		) tl;
 		raise (Completion (Buffer.contents b))
-	| Typecore.DisplayPosition pl ->
+	| Display.DisplayPosition pl ->
 		let b = Buffer.create 0 in
 		let error_printer file line = sprintf "%s:%d:" (Common.unique_full_path file) line in
 		Buffer.add_string b "<list>\n";
@@ -1779,6 +1806,8 @@ with
 				raise (Completion c)
 			| _ ->
 				error ctx ("Could not load module " ^ (Ast.s_type_path (p,c))) Ast.null_pos)
+	| Display.DocumentSymbols s ->
+		raise (Completion s)
 	| Interp.Sys_exit i ->
 		ctx.flush();
 		exit i
