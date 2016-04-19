@@ -372,20 +372,20 @@ let parse_hxml file =
 	IO.close_in ch;
 	parse_hxml_data data
 
-let lookup_classes com spath =
+let get_module_path_from_file_path com spath =
 	let rec loop = function
-		| [] -> []
+		| [] -> None
 		| cp :: l ->
 			let cp = (if cp = "" then "./" else cp) in
-			let c = normalize_path (get_real_path (Common.unique_full_path cp)) in
+			let c = add_trailing_slash (get_real_path (Common.get_full_path cp)) in
 			let clen = String.length c in
 			if clen < String.length spath && String.sub spath 0 clen = c then begin
 				let path = String.sub spath clen (String.length spath - clen) in
 				(try
 					let path = make_type_path path in
 					(match loop l with
-					| [x] when String.length (Ast.s_type_path x) < String.length (Ast.s_type_path path) -> [x]
-					| _ -> [path])
+					| Some x as r when String.length (Ast.s_type_path x) < String.length (Ast.s_type_path path) -> r
+					| _ -> Some path)
 				with _ -> loop l)
 			end else
 				loop l
@@ -1047,13 +1047,13 @@ try
 				l
 		in
 		let parts = Str.split_delim (Str.regexp "[;:]") p in
-		com.class_path <- "" :: List.map normalize_path (loop parts)
+		com.class_path <- "" :: List.map add_trailing_slash (loop parts)
 	with
 		Not_found ->
 			if Sys.os_type = "Unix" then
 				com.class_path <- ["/usr/lib/haxe/std/";"/usr/share/haxe/std/";"/usr/local/lib/haxe/std/";"/usr/lib/haxe/extraLibs/";"/usr/local/lib/haxe/extraLibs/";""]
 			else
-				let base_path = normalize_path (get_real_path (try executable_path() with _ -> "./")) in
+				let base_path = add_trailing_slash (get_real_path (try executable_path() with _ -> "./")) in
 				com.class_path <- [base_path ^ "std/";base_path ^ "extraLibs/";""]);
 	com.std_path <- List.filter (fun p -> ExtString.String.ends_with p "std/" || ExtString.String.ends_with p "std\\") com.class_path;
 	let set_platform pf file =
@@ -1077,7 +1077,7 @@ try
 	let basic_args_spec = [
 		("-cp",Arg.String (fun path ->
 			process_libs();
-			com.class_path <- normalize_path path :: com.class_path
+			com.class_path <- add_trailing_slash path :: com.class_path
 		),"<path> : add a directory to find source files");
 		("-js",Arg.String (set_platform Js),"<file> : compile code to JavaScript file");
 		("-lua",Arg.String (set_platform Lua),"<file> : compile code to Lua file");
@@ -1443,15 +1443,19 @@ try
 		com.warning <- message ctx;
 		com.error <- error ctx;
 		com.main_class <- None;
+		if com.display <> DMUsage then
+			classes := [];
 		let real = get_real_path (!Parser.resume_display).Ast.pfile in
-		classes := lookup_classes com real @ (if com.display = DMUsage then !classes else []);
-		if !classes = [] then begin
+		(match get_module_path_from_file_path com real with
+		| Some path ->
+			classes := path :: !classes
+		| None ->
 			if not (Sys.file_exists real) then failwith "Display file does not exist";
 			(match List.rev (ExtString.String.nsplit real path_sep) with
 			| file :: _ when file.[0] >= 'a' && file.[1] <= 'z' -> failwith ("Display file '" ^ file ^ "' should not start with a lowercase letter")
 			| _ -> ());
-			failwith "Display file was not found in class path";
-		end;
+			failwith "Display file was not found in class path"
+		);
 		Common.log com ("Display file : " ^ real);
 		Common.log com ("Classes found : ["  ^ (String.concat "," (List.map Ast.s_type_path !classes)) ^ "]");
 	end;

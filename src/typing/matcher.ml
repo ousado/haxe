@@ -54,7 +54,7 @@ let get_general_module_type ctx mt p =
 			end
 		| _ -> error "Cannot use this type as a value" p
 	in
-	Typeload.load_instance ctx {tname=loop mt;tpackage=[];tsub=None;tparams=[]} p true
+	Typeload.load_instance ctx ({tname=loop mt;tpackage=[];tsub=None;tparams=[]},p) true
 
 module Constructor = struct
 	type t =
@@ -252,7 +252,7 @@ module Pattern = struct
 		let rec loop e = match fst e with
 			| EParenthesis e1 | ECast(e1,None) ->
 				loop e1
-			| ECheckType(e, CTPath({tpackage=["haxe";"macro"]; tname="Expr"})) ->
+			| ECheckType(e, (CTPath({tpackage=["haxe";"macro"]; tname="Expr"}),_)) ->
 				let old = pctx.in_reification in
 				pctx.in_reification <- true;
 				let e = loop e in
@@ -275,7 +275,7 @@ module Pattern = struct
 					| _ ->
 						handle_ident i
 				end
-			| EVars([s,None,None]) ->
+			| EVars([(s,_),None,None]) ->
 				let v = add_local s in
 				PatVariable v
 			| ECall(e1,el) ->
@@ -1224,7 +1224,7 @@ module TexprConverter = struct
 	let to_texpr ctx t_switch match_debug with_type dt =
 		let com = ctx.com in
 		let p = dt.dt_pos in
-		let c_type = match follow (Typeload.load_instance ctx { tpackage = ["std"]; tname="Type"; tparams=[]; tsub = None} p true) with TInst(c,_) -> c | t -> assert false in
+		let c_type = match follow (Typeload.load_instance ctx ({ tpackage = ["std"]; tname="Type"; tparams=[]; tsub = None},p) true) with TInst(c,_) -> c | t -> assert false in
 		let mk_index_call e =
 			let cf = PMap.find "enumIndex" c_type.cl_statics in
 			make_static_call ctx c_type cf (fun t -> t) [e] com.basic.tint e.epos
@@ -1249,6 +1249,7 @@ module TexprConverter = struct
 					with Not_exhaustive -> match with_type,finiteness with
 						| NoValue,Infinite -> None
 						| _,CompileTimeFinite when unmatched = [] -> None
+						| _ when ctx.com.display <> DMNone -> None
 						| _ -> report_not_exhaustive e_subject unmatched
 				in
 				let cases = ExtList.List.filter_map (fun (con,_,dt) -> match unify_constructor ctx params e_subject.etype con with
@@ -1321,6 +1322,7 @@ module TexprConverter = struct
 					)
 				with Not_exhaustive ->
 					if toplevel then (fun () -> loop false params dt2)
+					else if ctx.com.display <> DMNone then (fun () -> mk (TConst TNull) (mk_mono()) dt2.dt_pos)
 					else report_not_exhaustive e [ConConst TNull,dt.dt_pos]
 				in
 				f()

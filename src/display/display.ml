@@ -5,12 +5,16 @@ open Type
 exception DocumentSymbols of string
 exception DisplayTypes of t list
 exception DisplayPosition of Ast.pos list
+exception DisplaySubExpression of Ast.expr
 
 let is_display_file p =
 	Common.unique_full_path p.pfile = (!Parser.resume_display).pfile
 
 let encloses_position p_target p =
 	p.pmin <= p_target.pmin && p.pmax >= p_target.pmax
+
+let is_display_position p =
+	is_display_file p && encloses_position !Parser.resume_display p
 
 let find_enclosing com e =
 	let display_pos = ref (!Parser.resume_display) in
@@ -74,6 +78,35 @@ let find_before_pos com e =
 	in
 	map e
 
+let display_type dm t =
+	try
+		let mt = module_type_of_type t in
+		begin match dm with
+			| DMPosition -> raise (DisplayPosition [(t_infos mt).mt_pos]);
+			| DMUsage ->
+				let ti = t_infos mt in
+				ti.mt_meta <- (Meta.Usage,[],ti.mt_pos) :: ti.mt_meta
+			| DMType -> raise (DisplayTypes [t])
+			| _ -> ()
+		end
+	with Exit ->
+		()
+
+let display_module_type dm mt =
+	display_type dm (type_of_module_type mt)
+
+let display_variable dm v = match dm with
+	| DMPosition -> raise (DisplayPosition [v.v_pos])
+	| DMUsage -> v.v_meta <- (Meta.Usage,[],v.v_pos) :: v.v_meta;
+	| DMType -> raise (DisplayTypes [v.v_type])
+	| _ -> ()
+
+let display_field dm cf = match dm with
+	| DMPosition -> raise (DisplayPosition [cf.cf_pos]);
+	| DMUsage -> cf.cf_meta <- (Meta.Usage,[],cf.cf_pos) :: cf.cf_meta;
+	| DMType -> raise (DisplayTypes [cf.cf_type])
+	| _ -> ()
+
 module SymbolKind = struct
 	type t =
 		| File
@@ -132,9 +165,21 @@ module SymbolInformation = struct
 	}
 end
 
-open Json
 open SymbolKind
 open SymbolInformation
+open Json
+
+let pos_to_json_location p =
+	if p.pmin = -1 then
+		JNull
+	else
+		let l1, p1, l2, p2 = Lexer.get_pos_coords p in
+		let to_json l c = JObject [("line", JInt l); ("character", JInt c)] in
+		JObject [
+			("file", JString (Common.unique_full_path p.pfile));
+			("start", to_json l1 p1);
+			("end", to_json l2 p2);
+		]
 
 let print_document_symbols (pack,decls) =
 	let l = DynArray.create() in
@@ -162,14 +207,14 @@ let print_document_symbols (pack,decls) =
 				| _ -> ()
 			end *)
 		| EVars vl ->
-			List.iter (fun (s,_,eo) ->
-				add_ignore s Variable p; (* TODO: Don't have a good pos here... *)
+			List.iter (fun ((s,p),_,eo) ->
+				add_ignore s Variable p;
 				expr_opt si eo
 			) vl
 		| ETry(e1,catches) ->
 			expr si e1;
-			List.iter (fun (s,_,e) ->
-				add_ignore s Variable (pos e); (* TODO: No good pos as usual... *)
+			List.iter (fun ((s,p),_,e) ->
+				add_ignore s Variable p;
 				expr si e
 			) catches;
 		| EFunction(Some s,f) ->
@@ -185,47 +230,49 @@ let print_document_symbols (pack,decls) =
 		| None -> ()
 		| Some e -> expr si e
 	and func si f =
-		List.iter (fun (s,_,_,eo) ->
-			let si_arg = add s Variable si.location (* TODO: don't have *) (Some si) in
+		List.iter (fun ((s,p),_,_,_,eo) ->
+			let si_arg = add s Variable p (Some si) in
 			expr_opt (Some si_arg) eo
 		) f.f_args;
 		expr_opt (Some si) f.f_expr
 	in
 	let field si_type cff = match cff.cff_kind with
 		| FVar(_,eo) ->
-			let si_field = add cff.cff_name Field cff.cff_pos (Some si_type) in
+			let si_field = add (fst cff.cff_name) Field (pos cff.cff_name) (Some si_type) in
 			expr_opt (Some si_field) eo
 		| FFun f ->
-			let si_method = add cff.cff_name (if cff.cff_name = "new" then Constructor else Method) cff.cff_pos (Some si_type) in
+			let si_method = add (fst cff.cff_name) (if fst cff.cff_name = "new" then Constructor else Method) (pos cff.cff_name) (Some si_type) in
 			func si_method f
 		| FProp(_,_,_,eo) ->
-			let si_property = add cff.cff_name Property cff.cff_pos (Some si_type) in
+			let si_property = add (fst cff.cff_name) Property (pos cff.cff_name) (Some si_type) in
 			expr_opt (Some si_property) eo
 	in
 	List.iter (fun (td,p) -> match td with
 		| EImport _ | EUsing _ ->
 			() (* TODO: Can we do anything with these? *)
 		| EClass d ->
-			let si_type = add d.d_name (if List.mem HInterface d.d_flags then Interface else Class) p si_pack in
+			let si_type = add (fst d.d_name) (if List.mem HInterface d.d_flags then Interface else Class) (pos d.d_name) si_pack in
 			List.iter (field si_type) d.d_data
 		| EEnum d ->
-			let si_type = add d.d_name Enum p si_pack in
+			let si_type = add (fst d.d_name) Enum (pos d.d_name) si_pack in
 			List.iter (fun ef ->
-				ignore (add ef.ec_name Method ef.ec_pos (Some si_type))
+				ignore (add (fst ef.ec_name) Method (pos ef.ec_name) (Some si_type))
 			) d.d_data
 		| ETypedef d ->
-			(* TODO: hmm... *)
-			()
+			let si_type = add (fst d.d_name) Interface (pos d.d_name) si_pack in
+			(match d.d_data with
+			| CTAnonymous fields,_ ->
+				List.iter (field si_type) fields
+			| _ -> ())
 		| EAbstract d ->
-			let si_type = add d.d_name Class p si_pack in
+			let si_type = add (fst d.d_name) Class (pos d.d_name) si_pack in
 			List.iter (field si_type) d.d_data
 	) decls;
-	let error_printer file line = Printf.sprintf "%s:%d:" (Common.unique_full_path file) line in
 	let jl = List.map (fun si ->
 		let l =
 			("name",JString si.name) ::
 			("kind",JInt (to_int si.kind)) ::
-			("location",JString (Lexer.get_error_pos error_printer si.location)) ::
+			("location", pos_to_json_location si.location) ::
 			(match si.containerName with None -> [] | Some s -> ["containerName",JString s])
 		in
 		JObject l
