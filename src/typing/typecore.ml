@@ -43,7 +43,7 @@ type macro_mode =
 	| MExpr
 	| MBuild
 	| MMacroType
-
+	| MDisplay
 
 type typer_pass =
 	| PBuildModule			(* build the module structure and setup module type parameters *)
@@ -257,7 +257,7 @@ let make_static_call ctx c cf map args t p =
 	make_call ctx ef args (map t) p
 
 let raise_or_display ctx l p =
-	if ctx.untyped then ()
+	if ctx.untyped || ctx.com.display <> DMNone then ()
 	else if ctx.in_call_args then raise (WithTypeError(l,p))
 	else display_error ctx (error_msg (Unify l)) p
 

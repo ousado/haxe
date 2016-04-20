@@ -472,7 +472,7 @@ let rec load_instance ?(allow_display=false) ctx (t,p) allow_no_params =
 		end
 	in
 	if allow_display && ctx.com.display <> DMNone && Display.is_display_position p then
-		Display.display_type ctx.com.display t;
+		Display.display_type ctx.com.display t p;
 	t
 
 (*
@@ -1501,12 +1501,13 @@ end
 
 let rec type_type_param ?(enum_constructor=false) ctx path get_params p tp =
 	let n = fst tp.tp_name in
-	let c = mk_class ctx.m.curmod (fst path @ [snd path],n) p in
+	let c = mk_class ctx.m.curmod (fst path @ [snd path],n) (pos tp.tp_name) in
 	c.cl_params <- type_type_params ctx c.cl_path get_params p tp.tp_params;
 	c.cl_kind <- KTypeParameter [];
 	c.cl_meta <- tp.Ast.tp_meta;
 	if enum_constructor then c.cl_meta <- (Meta.EnumConstructorParam,[],c.cl_pos) :: c.cl_meta;
 	let t = TInst (c,List.map snd c.cl_params) in
+	if Display.is_display_position (pos tp.tp_name) then Display.display_type ctx.com.display t (pos tp.tp_name);
 	match tp.tp_constraints with
 	| [] ->
 		n, t
@@ -1534,7 +1535,7 @@ let rec type_type_param ?(enum_constructor=false) ctx path get_params p tp =
 and type_type_params ?(enum_constructor=false) ctx path get_params p tpl =
 	let names = ref [] in
 	List.map (fun tp ->
-		if List.exists (fun name -> name = fst tp.tp_name) !names then display_error ctx ("Duplicate type parameter name: " ^ fst tp.tp_name) p;
+		if List.exists (fun name -> name = fst tp.tp_name) !names then display_error ctx ("Duplicate type parameter name: " ^ fst tp.tp_name) (pos tp.tp_name);
 		names := (fst tp.tp_name) :: !names;
 		type_type_param ~enum_constructor ctx path get_params p tp
 	) tpl
@@ -1552,7 +1553,7 @@ let type_function ctx args ret fmode f do_display p =
 		let v,c = add_local ctx n t pn, c in
 		v.v_meta <- m;
 		if do_display && Display.encloses_position !Parser.resume_display pn then
-			Display.display_variable ctx.com.display v;
+			Display.display_variable ctx.com.display v pn;
 		if n = "this" then v.v_meta <- (Meta.This,[],p) :: v.v_meta;
 		v,c
 	) args f.f_args in
@@ -1577,7 +1578,7 @@ let type_function ctx args ret fmode f do_display p =
 		with
 		| Parser.TypePath (_,None,_) | Exit ->
 			type_expr ctx e NoValue
-		| Display.DisplayTypes [t] when (match follow t with TMono _ -> true | _ -> false) ->
+		| Display.DisplayType (t,_) | Display.DisplaySignatures [t] when (match follow t with TMono _ -> true | _ -> false) ->
 			type_expr ctx (if ctx.com.display = DMToplevel then Display.find_enclosing ctx.com e else e) NoValue
 	end in
 	let e = match e.eexpr with
@@ -2093,7 +2094,7 @@ module ClassInitializer = struct
 			if fctx.is_display_field then begin
 				if fctx.is_macro && not ctx.in_macro then
 					(* force macro system loading of this class in order to get completion *)
-					delay ctx PTypeField (fun() -> ignore(ctx.g.do_macro ctx MExpr c.cl_path cf.cf_name [] p))
+					delay ctx PTypeField (fun() -> ignore(ctx.g.do_macro ctx MDisplay c.cl_path cf.cf_name [] p))
 				else begin
 					cf.cf_type <- TLazy r;
 					cctx.delayed_expr <- (ctx,Some r) :: cctx.delayed_expr;
@@ -2224,7 +2225,7 @@ module ClassInitializer = struct
 
 	let check_field_display com p cf =
  		if Display.encloses_position !Parser.resume_display p then
-			Display.display_field com.display cf
+			Display.display_field com.display cf p
 
 	let create_variable (ctx,cctx,fctx) c f t eo p =
 		if not fctx.is_static && cctx.abstract <> None then error (fst f.cff_name ^ ": Cannot declare member variable in abstract") p;
@@ -2988,7 +2989,7 @@ let init_module_type ctx context_init do_init (decl,p) =
 		context_init := (fun() -> ctx.m.module_using <- filter_classes types @ ctx.m.module_using) :: !context_init
 	| EClass d ->
 		let c = (match get_type (fst d.d_name) with TClassDecl c -> c | _ -> assert false) in
-		if Display.is_display_position (pos d.d_name) then Display.display_module_type ctx.com.display (TClassDecl c);
+		if Display.is_display_position (pos d.d_name) then Display.display_module_type ctx.com.display (TClassDecl c) (pos d.d_name);
 		check_global_metadata ctx (fun m -> c.cl_meta <- m :: c.cl_meta) c.cl_module.m_path c.cl_path None;
 		let herits = d.d_flags in
 		if Meta.has Meta.Generic c.cl_meta && c.cl_params <> [] then c.cl_kind <- KGeneric;
@@ -3048,7 +3049,7 @@ let init_module_type ctx context_init do_init (decl,p) =
 			);
 	| EEnum d ->
 		let e = (match get_type (fst d.d_name) with TEnumDecl e -> e | _ -> assert false) in
-		if Display.is_display_position (pos d.d_name) then Display.display_module_type ctx.com.display (TEnumDecl e);
+		if Display.is_display_position (pos d.d_name) then Display.display_module_type ctx.com.display (TEnumDecl e) (pos d.d_name);
 		let ctx = { ctx with type_params = e.e_params } in
 		let h = (try Some (Hashtbl.find ctx.g.type_patches e.e_path) with Not_found -> None) in
 		check_global_metadata ctx (fun m -> e.e_meta <- m :: e.e_meta) e.e_module.m_path e.e_path None;
@@ -3160,7 +3161,7 @@ let init_module_type ctx context_init do_init (decl,p) =
 			if is_display_file && Display.encloses_position !Parser.resume_display p then begin match ctx.com.display with
 				| DMPosition -> raise (Display.DisplayPosition [p]);
 				| DMUsage -> f.ef_meta <- (Meta.Usage,[],p) :: f.ef_meta;
-				| DMType -> raise (Display.DisplayTypes [f.ef_type])
+				| DMType -> raise (Display.DisplayType (f.ef_type,p))
 				| _ -> ()
 			end;
 			e.e_constrs <- PMap.add f.ef_name f e.e_constrs;
@@ -3188,7 +3189,7 @@ let init_module_type ctx context_init do_init (decl,p) =
 			);
 	| ETypedef d ->
 		let t = (match get_type (fst d.d_name) with TTypeDecl t -> t | _ -> assert false) in
-		if Display.is_display_position (pos d.d_name) then Display.display_module_type ctx.com.display (TTypeDecl t);
+		if Display.is_display_position (pos d.d_name) then Display.display_module_type ctx.com.display (TTypeDecl t) (pos d.d_name);
 		check_global_metadata ctx (fun m -> t.t_meta <- m :: t.t_meta) t.t_module.m_path t.t_path None;
 		let ctx = { ctx with type_params = t.t_params } in
 		let tt = load_complex_type ctx true d.d_data in
@@ -3218,7 +3219,7 @@ let init_module_type ctx context_init do_init (decl,p) =
 			);
 	| EAbstract d ->
 		let a = (match get_type (fst d.d_name) with TAbstractDecl a -> a | _ -> assert false) in
-		if Display.is_display_position (pos d.d_name) then Display.display_module_type ctx.com.display (TAbstractDecl a);
+		if Display.is_display_position (pos d.d_name) then Display.display_module_type ctx.com.display (TAbstractDecl a) (pos d.d_name);
 		check_global_metadata ctx (fun m -> a.a_meta <- m :: a.a_meta) a.a_module.m_path a.a_path None;
 		let ctx = { ctx with type_params = a.a_params } in
 		let is_type = ref false in
