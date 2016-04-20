@@ -1603,7 +1603,7 @@ module VarCapturing = struct
 		in
 
 		let mk_var v used =
-			let v2 = alloc_var v.v_name (PMap.find v.v_id used) in
+			let v2 = alloc_var v.v_name (PMap.find v.v_id used) v.v_pos in
 			v2.v_meta <- v.v_meta;
 			v2
 		in
@@ -1669,7 +1669,7 @@ module VarCapturing = struct
 				*)
 				if com.config.pf_capture_policy = CPLoopVars then
 					(* We don't want to duplicate any variable declarations, so let's make copies (issue #3902). *)
-					let new_vars = List.map (fun v -> v.v_id,alloc_var v.v_name v.v_type) vars in
+					let new_vars = List.map (fun v -> v.v_id,alloc_var v.v_name v.v_type v.v_pos) vars in
 					let rec loop e = match e.eexpr with
 						| TLocal v ->
 							begin try

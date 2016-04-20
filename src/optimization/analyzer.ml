@@ -977,7 +977,7 @@ module TCE = struct
 				if bb_decl.bb_id = g.g_root.bb_id then None else Some(bb_decl)
 			in
 			let (call_vars_rev,call_var_m) = List.fold_left ( fun (l,m) (v,co) ->
-					let cv = alloc_var (Printf.sprintf "_tce_%d_%s" idx v.v_name) v.v_type in (* allocating the call tmp vars here *)
+					let cv = alloc_var (Printf.sprintf "_tce_%d_%s" idx v.v_name) v.v_type v.v_pos in (* allocating the call tmp vars here *)
 					let m = PMap.add v.v_id cv m in
 					let l = (v,cv,co) :: l in
 					(l,m)
@@ -1068,7 +1068,7 @@ module TCE = struct
 			add_texpr bb e
 		in
 
-		let mk_local v = mk(TLocal v) v.v_type null_pos in
+		let mk_local v = mk(TLocal v) v.v_type v.v_pos in
 		let close_blocks l = List.iter (fun bb -> bb.bb_closed <- true ) l in
 		let fdata_entry = Option.get mctx.entry_func in
 
@@ -1080,7 +1080,7 @@ module TCE = struct
 
 		(* handle `this` - get type, rewrite expressions, declare *)
 		let thisdata = begin
-			let vthis = alloc_var ( Printf.sprintf  "_tce_this%d" fdata_entry.f_index ) tvoid in
+			let vthis = alloc_var ( Printf.sprintf  "_tce_this%d" fdata_entry.f_index ) tvoid null_pos in
 			(match fdata_entry.f_kind with
 				| FKInstance _ ->
 					let rec loop e = (match e.eexpr with
@@ -1160,7 +1160,7 @@ module TCE = struct
 
 		(* switch branch *)
 		let mk_int i =  (mk (TConst( TInt(Int32.of_int i)))  tint null_pos) in
-		let tce_loop_var = alloc_var "_hx_tce_current_function" tint in
+		let tce_loop_var = alloc_var "_hx_tce_current_function" tint null_pos in
 		define_var bb_setup tce_loop_var (Some (mk (TConst( TInt(Int32.of_int fdata_entry.f_index)))  tint null_pos));
 
 		add_texpr bb_switch (wrap_meta ":cond-branch" (mk (TLocal(tce_loop_var)) tce_loop_var.v_type null_pos));
@@ -1222,7 +1222,7 @@ module TCE = struct
 						let fdata_callee = cd.cd_fdata in
 						let calldata_args = (List.combine fdata_callee.f_call_vars cd.cd_args) in
 						let cvs = List.map (fun ((v,cv,co),evalue) ->
-							let cv = alloc_var cv.v_name cv.v_type in
+							let cv = alloc_var cv.v_name cv.v_type v.v_pos in
 							define_var bb cv (Some evalue);
 							cv;
 						) calldata_args in
