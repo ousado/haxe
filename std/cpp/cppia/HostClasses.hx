@@ -62,16 +62,23 @@ class HostClasses
    "sys.db.Object",
    "sys.db.Manager",
    "sys.db.Connection",
+   "sys.db.Object",
    "sys.FileSystem",
    "sys.io.File",
    "sys.io.FileInput",
+   "sys.net.UdpSocket",
    "sys.net.Socket",
+   "sys.ssl.Certificate",
+   "sys.ssl.Digest",
+   "sys.ssl.Key",
+   "sys.ssl.Socket",
    "Enum",
    "EnumValue",
    //"Sys",
    "Type",
    "Xml",
    "Date",
+   "Lambda",
    "DateTools",
    "List",
    "Math",
@@ -82,6 +89,7 @@ class HostClasses
    "haxe.ds.IntMap",
    "haxe.ds.ObjectMap",
    "haxe.ds.StringMap",
+   "haxe.ds.BalancedTree",
    "haxe.CallStack",
    "haxe.Serializer",
    "haxe.Unserializer",
@@ -89,6 +97,7 @@ class HostClasses
    "haxe.Template",
    "haxe.Utf8",
    "haxe.Log",
+   "haxe.zip.Compress",
    "haxe.zip.Uncompress",
 
    "haxe.crypto.BaseCode",
@@ -184,6 +193,18 @@ class HostClasses
       externs.set("haxe._Int64.___Int64",true);
       externs.set("haxe._Int32.Int32_Impl_",true);
       externs.set("haxe._Int32.___Int32",true);
+      // Hidded in implementation classes
+      externs.set("sys.db.RecordType",true);
+      externs.set("sys.db._Sqlite.SqliteConnection",true);
+      externs.set("sys.db._Sqlite.SqliteResultSet",true);
+      externs.set("sys.db._Mysql.MysqlConnection",true);
+      externs.set("sys.db._Mysql.MysqlResultSet",true);
+      externs.set("sys.net._Socket.SocketInput",true);
+      externs.set("sys.net._Socket.SocketOutput",true);
+      externs.set("sys.ssl._Socket.SocketInput",true);
+      externs.set("sys.ssl._Socket.SocketOutput",true);
+      externs.set("haxe.ds.TreeNode",true);
+      externs.set("haxe.xml.XmlParserException",true);
       for(e in classes)
          externs.set(e,true);
 

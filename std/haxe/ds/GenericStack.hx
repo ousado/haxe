@@ -21,7 +21,12 @@
  */
 package haxe.ds;
 
-#if (flash9 || cpp || c)
+/**
+	A cell of `haxe.ds.GenericStack`.
+  
+	@see http://haxe.org/manual/std-GenericStack.html
+**/
+#if (flash || cpp)
 @:generic
 #end
 class GenericCell<T> {
@@ -53,8 +58,10 @@ private class GenericStackIterator<T> extends cpp.FastIterator<T> {
 
 	The generated name is an implementation detail and should not be relied
 	upon.
+
+	@see http://haxe.org/manual/std-GenericStack.html
 **/
-#if (flash9 || cpp || c)
+#if (flash || cpp)
 @:generic
 #end
 class GenericStack<T> {

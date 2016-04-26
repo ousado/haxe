@@ -69,6 +69,8 @@ class TestRunner {
 			untyped __java__("java.lang.System.out.print(str)");
 		#elseif python
 			python.Lib.print(v);
+		#elseif (hl || lua)
+			Sys.print(Std.string(v));
 		#end
 	}
 

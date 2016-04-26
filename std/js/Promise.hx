@@ -40,7 +40,7 @@ extern class Promise<T>
 	/** @throws DOMError */
 	function new( init : (T -> Void) -> (Dynamic -> Void) -> Void ) : Void;
 
-	function then<TOut>( ?fulfillCallback : PromiseCallback<T, TOut>, ?rejectCallback : EitherType<Dynamic -> Void, PromiseCallback<Dynamic, TOut>> ) : Promise<TOut>;
+	function then<TOut>( fulfillCallback : Null<PromiseCallback<T, TOut>>, ?rejectCallback : EitherType<Dynamic -> Void, PromiseCallback<Dynamic, TOut>> ) : Promise<TOut>;
 
 	@:native("catch")
 	function catchError<TOut>( rejectCallback : EitherType<Dynamic -> Void, PromiseCallback<Dynamic, TOut>> ) : Promise<TOut>;
@@ -49,5 +49,5 @@ extern class Promise<T>
 typedef PromiseCallback<T, TOut> = EitherType<T -> TOut, T -> Promise<TOut>>;
 
 typedef Thenable<T> = {
-	then : EitherType<(T -> Void) -> (Dynamic -> Void) -> Void, (T -> Void) -> Void>
+	function then(resolve:T->Void, ?reject:Dynamic->Void):Void;
 }

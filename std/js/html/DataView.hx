@@ -20,9 +20,12 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-// This file is generated from typedarray.webidl line 217:0. Do not edit!
+// This file is generated from typedarray.webidl line 208:0. Do not edit!
 
 package js.html;
+
+// Explicitly include the compatibility class
+import js.html.compat.DataView;
 
 @:native("DataView")
 extern class DataView extends ArrayBufferView

@@ -47,7 +47,7 @@ private typedef ExprToken = {
 	String, and to have some basic logic.
 
 	A complete documentation of the supported syntax is available at:
-	<a href="http://haxe.org/manual/std-template.html">http://haxe.org/manual/std-template.html</a>
+	<http://haxe.org/manual/std-template.html>
 **/
 class Template {
 
@@ -112,8 +112,9 @@ class Template {
 	}
 
 	function resolve( v : String ) : Dynamic {
-		if( Reflect.hasField(context,v) )
-			return Reflect.field(context,v);
+		var value = Reflect.field(context, v);
+		if( value != null || Reflect.hasField(context,v) )
+			return value;
 		for( ctx in stack )
 			if( Reflect.hasField(ctx,v) )
 				return Reflect.field(ctx,v);

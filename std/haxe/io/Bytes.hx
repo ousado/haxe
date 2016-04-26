@@ -91,8 +91,6 @@ class Bytes {
 		java.lang.System.arraycopy(src.b, srcpos, b, pos, len);
 		#elseif cs
 		cs.system.Array.Copy(src.b, srcpos, b, pos, len);
-		#elseif c
-		c.CString.memcpy(b.array + pos, src.b.array + srcpos, len);
 		#elseif python
 		python.Syntax.pythonCode("self.b[{0}:{0}+{1}] = src.b[srcpos:srcpos+{1}]", pos, len);
 		#elseif cpp
@@ -153,10 +151,6 @@ class Bytes {
 		var newarr = new cs.NativeArray(len);
 		cs.system.Array.Copy(b, pos, newarr, 0, len);
 		return new Bytes(len, newarr);
-		#elseif c
-		var b2 = new Bytes(len, new c.FixedArray(len));
-		c.CString.memcpy(b2.b.array, b.array + pos, len);
-		return b2;
 		#elseif python
 		return new Bytes(len, python.Syntax.arrayAccess(b, pos, pos+len) );
 		#else
@@ -197,8 +191,6 @@ class Bytes {
 		return b.compare(other.b);
 		//#elseif cs
 		//TODO: memcmp if unsafe flag is on
-		#elseif c
-		return 0;
 		#elseif cpp
 		return b.memcmp(other.b);
 		#else
@@ -327,7 +319,10 @@ class Bytes {
 		return untyped $sget32(b, pos, false);
 		#elseif (php || python)
 		var v = get(pos) | (get(pos + 1) << 8) | (get(pos + 2) << 16) | (get(pos+3) << 24);
-        return if( v & 0x80000000 != 0 ) v | 0x80000000 else v;
+		return if( v & 0x80000000 != 0 ) v | 0x80000000 else v;
+		#elseif lua
+		var v = get(pos) | (get(pos + 1) << 8) | (get(pos + 2) << 16) | (get(pos+3) << 24);
+		return lua.Boot.clamp(if( v & 0x80000000 != 0 ) v | 0x80000000 else v);
 		#else
 		return get(pos) | (get(pos + 1) << 8) | (get(pos + 2) << 16) | (get(pos+3) << 24);
 		#end
@@ -383,10 +378,12 @@ class Bytes {
 		try
 			return new String(b, pos, len, "UTF-8")
 		catch (e:Dynamic) throw e;
-		#elseif c
-		return null;
 		#elseif python
 		return python.Syntax.pythonCode("self.b[{0}:{0}+{1}].decode('UTF-8','replace')", pos, len);
+		#elseif lua
+		var begin = cast(Math.min(pos,b.length),Int);
+		var end = cast(Math.min(pos+len,b.length),Int);
+		return [for (i in begin...end) String.fromCharCode(b[i])].join("");
 		#else
 		var s = "";
 		var b = b;
@@ -439,14 +436,11 @@ class Bytes {
 			return new String(b, 0, length, "UTF-8");
 		}
 		catch (e:Dynamic) throw e;
-		#elseif c
-		return null;
 		#else
 		return getString(0,length);
 		#end
 	}
 
-	#if !c
 	public function toHex() : String {
 		var s = new StringBuf();
 		var chars = [];
@@ -460,7 +454,6 @@ class Bytes {
 		}
 		return s.toString();
 	}
-	#end
 
 	public inline function getData() : BytesData {
 		return b;
@@ -483,8 +476,6 @@ class Bytes {
 		return new Bytes(length, new cs.NativeArray(length));
 		#elseif java
 		return new Bytes(length, new java.NativeArray(length));
-		#elseif c
-		return new Bytes(length, new c.FixedArray(length));
 		#elseif python
 		return new Bytes(length, new python.Bytearray(length));
 		#else
@@ -495,6 +486,7 @@ class Bytes {
 		#end
 	}
 
+	@:pure
 	public static function ofString( s : String ) : Bytes {
 		#if neko
 		return new Bytes(s.length,untyped __dollar__ssub(s.__s,0,s.length));
@@ -519,11 +511,14 @@ class Bytes {
 			return new Bytes(b.length, b);
 		}
 		catch (e:Dynamic) throw e;
-		#elseif c
-		return null;
+
 		#elseif python
-		var b:BytesData = new python.Bytearray(s, "UTF-8");
-		return new Bytes(b.length, b);
+			var b:BytesData = new python.Bytearray(s, "UTF-8");
+			return new Bytes(b.length, b);
+
+		#elseif lua
+			var bytes = [for (c in 0...s.length) StringTools.fastCodeAt(s,c)];
+			return new Bytes(bytes.length, bytes);
 		#else
 		var a = new Array();
 		// utf16-decode and utf8-encode
@@ -562,8 +557,6 @@ class Bytes {
 		return new Bytes(b.length, b);
 		#elseif cs
 		return new Bytes(b.Length,b);
-		#elseif c
-		return new Bytes(b.length,b);
 		#else
 		return new Bytes(b.length,b);
 		#end
@@ -584,8 +577,6 @@ class Bytes {
 		return untyped b.unsafeGet(pos);
 		#elseif java
 		return untyped b[pos] & 0xFF;
-		#elseif c
-		return b[pos];
 		#else
 		return b[pos];
 		#end

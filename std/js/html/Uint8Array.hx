@@ -20,9 +20,12 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-// This file is generated from typedarray.webidl line 59:0. Do not edit!
+// This file is generated from typedarray.webidl line 82:0. Do not edit!
 
 package js.html;
+
+// Explicitly include the compatibility class
+import js.html.compat.Uint8Array;
 
 @:native("Uint8Array")
 extern class Uint8Array extends ArrayBufferView implements ArrayAccess<Int>

@@ -20,9 +20,12 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-// This file is generated from typedarray.webidl line 12:0. Do not edit!
+// This file is generated from typedarray.webidl line 43:0. Do not edit!
 
 package js.html;
+
+// Explicitly include the compatibility class
+import js.html.compat.ArrayBuffer;
 
 @:native("ArrayBuffer")
 extern class ArrayBuffer

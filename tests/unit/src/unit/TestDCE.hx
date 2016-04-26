@@ -1,6 +1,6 @@
 package unit;
 
-@:analyzer(no_check_has_effect, no_local_dce)
+@:analyzer(no_local_dce)
 class DCEClass {
 	// used statics
 	static function staticUsed() { }
@@ -117,7 +117,8 @@ class TestDCE extends Test {
 		nhf(bc, "get_x");
 	}
 
-	#if (!cpp && !java && !cs)
+	// TODO: this should be possible in lua
+	#if (!cpp && !java && !cs && !lua)
 	public function testProperty2() {
 		var a = new RemovePropertyKeepAccessors();
 		a.test = 3;
