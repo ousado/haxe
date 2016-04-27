@@ -656,14 +656,10 @@ let get_config com =
 		{
 			pf_static = true;
 			pf_sys = true;
-			pf_locals_scope = true;
-			pf_captured_scope = true;
-			pf_unique_locals = false;
 			pf_capture_policy = CPWrapRef;
 			pf_pad_nulls = true;
 			pf_add_final_return = true;
 			pf_overload = false;
-			pf_pattern_matching = false;
 			pf_can_skip_non_nullable_argument = false;
 			pf_reserved_type_paths = [];
 		}
@@ -671,14 +667,10 @@ let get_config com =
 		{
 			pf_static = true;
 			pf_sys = true;
-			pf_locals_scope = true;
-			pf_captured_scope = true;
-			pf_unique_locals = false;
 			pf_capture_policy = CPWrapRef;(*CPNone; (*// CPWrapRef;*)*)
 			pf_pad_nulls = true;
 			pf_add_final_return = false;
 			pf_overload = false;
-			pf_pattern_matching = false;
 			pf_can_skip_non_nullable_argument = false;
 			pf_reserved_type_paths = [];
 		}

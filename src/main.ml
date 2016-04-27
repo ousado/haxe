@@ -1116,7 +1116,6 @@ try
 		),"<file> : generate Python code as target file");
 		("-llvm",Arg.String (fun dir ->
 			Common.define com Define.Llvm;
-			Common.define com Define.Analyzer;
 			set_platform C dir;
 		),"<file> : generate LLVM code into target directory");
 		("-hl",Arg.String (fun file ->
@@ -1647,8 +1646,8 @@ try
 					Genjava.generate,"java"
 				| Python ->
 					Genpy.generate,"python"
-				| C when Common.defined com Define.Llvm ->
-					Genllvm.generate,"llvm"
+				(*| C when Common.defined com Define.Llvm ->
+					Genllvm.generate,"llvm" *)
 				| C ->
 					Genc.generate,"C"
 				| Hl ->

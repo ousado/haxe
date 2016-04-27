@@ -153,6 +153,10 @@ class Bytes {
 		return new Bytes(len, newarr);
 		#elseif python
 		return new Bytes(len, python.Syntax.arrayAccess(b, pos, pos+len) );
+		#elseif c
+		var b2 = new Bytes(len, new c.FixedArray(len));
+		c.CString.memcpy(b2.b.array, b.array + pos, len);
+		return b2;
 		#else
 		return new Bytes(len,b.slice(pos,pos+len));
 		#end
@@ -384,6 +388,8 @@ class Bytes {
 		var begin = cast(Math.min(pos,b.length),Int);
 		var end = cast(Math.min(pos+len,b.length),Int);
 		return [for (i in begin...end) String.fromCharCode(b[i])].join("");
+		#elseif c
+		return null;
 		#else
 		var s = "";
 		var b = b;
@@ -436,6 +442,8 @@ class Bytes {
 			return new String(b, 0, length, "UTF-8");
 		}
 		catch (e:Dynamic) throw e;
+		#elseif c
+		return null;
 		#else
 		return getString(0,length);
 		#end
@@ -478,6 +486,8 @@ class Bytes {
 		return new Bytes(length, new java.NativeArray(length));
 		#elseif python
 		return new Bytes(length, new python.Bytearray(length));
+		#elseif c
+		return new Bytes(length, new c.FixedArray(length));
 		#else
 		var a = new Array();
 		for( i in 0...length )
@@ -519,6 +529,8 @@ class Bytes {
 		#elseif lua
 			var bytes = [for (c in 0...s.length) StringTools.fastCodeAt(s,c)];
 			return new Bytes(bytes.length, bytes);
+		#elseif c
+			return null;
 		#else
 		var a = new Array();
 		// utf16-decode and utf8-encode
@@ -577,6 +589,8 @@ class Bytes {
 		return untyped b.unsafeGet(pos);
 		#elseif java
 		return untyped b[pos] & 0xFF;
+		#elseif c
+		return b[pos];
 		#else
 		return b[pos];
 		#end

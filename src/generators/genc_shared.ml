@@ -4,7 +4,7 @@ open Common
 
 let is_main p = p.pfile = "src/Main.hx"
 
-let null_wrap_const = ref Const
+let null_wrap_const = ref Closed
 
 let mk_runtime_prefix n = "_hx_" ^ n
 let cf_name_vtable = mk_runtime_prefix "v_table"
@@ -258,7 +258,7 @@ end
 (* Static extensions for functions *)
 module ExtFunction = struct
 	let get_closure_environment tf =
-		let v_env = alloc_var "env" (mk_mono()) in
+		let v_env = alloc_var "env" (mk_mono()) null_pos in
 		let e_env p = mk (TLocal v_env) v_env.v_type p in
 		let mk_acc cf p = mk (TField(e_env p,FAnon cf)) cf.cf_type p in
 		let known = ref PMap.empty in
@@ -311,7 +311,7 @@ module ExtFunction = struct
 		let args,el = List.fold_left (fun (args,el) (v,cto) -> match cto with
 			| Some ct when ct <> TNull ->
 				let v' = if not (is_nullable v.v_type) then
-					alloc_var v.v_name (com.basic.tnull v.v_type)
+					alloc_var v.v_name (com.basic.tnull v.v_type) v.v_pos
 				else
 					v
 				in
@@ -345,7 +345,7 @@ module TypeChecker = struct
 			| t -> error ("Unsupported assignment of a function to " ^ (s_type (print_context()) t)) e.epos
 		in
 		let vl = List.map (fun (n,o,t) ->
-			alloc_var n t
+			alloc_var n t null_pos
 		) tl2 in
 		let evl = List.map2 (fun v (_,_,t) ->
 			let e = mk (TLocal v) v.v_type e.epos in
@@ -420,7 +420,7 @@ module Specializer = struct
 		let vars = Hashtbl.create 0 in
 		let fv v =
 			try Hashtbl.find vars v.v_id with Not_found ->
-			let v2 = Type.alloc_var v.v_name (ft v.v_type) in
+			let v2 = Type.alloc_var v.v_name (ft v.v_type) v.v_pos in
 			v2.v_meta <- v.v_meta;
 			Hashtbl.add vars v.v_id v2;
 			v2
@@ -480,7 +480,7 @@ module ClassPreprocessor = struct
 		else begin
 			let ta = {
 				a_fields = PMap.foldi (fun n (_,cf) acc -> PMap.add n cf acc) !overridden PMap.empty;
-				a_status = ref Const;
+				a_status = ref Closed;
 			} in
 			let cf = mk_field cf_name_vtable (TAnon ta) c.cl_pos in
 			c.cl_ordered_fields <- cf :: c.cl_ordered_fields;

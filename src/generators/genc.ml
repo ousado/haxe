@@ -656,7 +656,7 @@ module Filters = struct
 		);
 		gen.declare_temp <- (fun t eopt ->
 			incr temp_var_counter;
-			let v = alloc_var ("_tmp" ^ (string_of_int !temp_var_counter)) t in
+			let v = alloc_var ("_tmp" ^ (string_of_int !temp_var_counter)) t null_pos in
 			gen.declare_var (v,eopt);
 			v
 		);
@@ -850,7 +850,7 @@ module DefaultValues = struct
 							e
 						end
 					| TConst TThis ->
-						v_this := Some (alloc_var "this" e.etype);
+						v_this := Some (alloc_var "this" e.etype null_pos);
 						e
 					| _ ->
 						Type.map_expr replace e
@@ -897,7 +897,7 @@ module DefaultValues = struct
 					let is_field_func = match !fstack with [_] -> true | _ -> false in
 					let name = if is_field_func then (mk_runtime_prefix ("known_" ^ gen.gfield.cf_name)) else alloc_temp_func gen.gcon in
 					let subst,tf_args = List.fold_left (fun (subst,args) (v,_) ->
-						let vr = alloc_var v.v_name (follow v.v_type) in
+						let vr = alloc_var v.v_name (follow v.v_type) v.v_pos in
 						((v,vr) :: subst),((vr,None) :: args)
 					) ([],[]) tf.tf_args in
 					let tf_args = List.rev tf_args in
@@ -1309,9 +1309,9 @@ module ClosureHandler = struct
 		let add_local v = if not (PMap.mem v.v_name !locals) then locals := PMap.add v.v_name v !locals in
 		let add_unknown v = if not (PMap.mem v.v_name !unknown) then unknown := PMap.add v.v_name v !unknown in
 		List.iter (fun (v,_) -> add_local v) tf.tf_args;
-		let v_this = alloc_var "this" (match ethis with Some e -> e.etype | _ -> mk_mono()) in
+		let v_this = alloc_var "this" (match ethis with Some e -> e.etype | _ -> mk_mono()) null_pos in
 		let t_ctx = mk_mono() in
-		let v_ctx = alloc_var ctx_name t_ctx in
+		let v_ctx = alloc_var ctx_name t_ctx null_pos in
 		let e_ctx = mk (TLocal v_ctx) v_ctx.v_type p in
 		let mk_ctx_field v =
 			let ef = mk (TField(e_ctx,FDynamic v.v_name)) v.v_type p in
@@ -1558,11 +1558,11 @@ module ExprTransformation = struct
 			| _ -> assert false
 		in
 		let c_array = gen.gcon.hxc.c_array in
-		let v = alloc_var "arr" (TInst(c_array,[tparam])) in
+		let v = alloc_var "arr" (TInst(c_array,[tparam])) null_pos in
 		let eloc = mk (TLocal v) v.v_type p in
 		let eret = mk (TReturn (Some (eloc))) t_dynamic p in
 		let (vars,einit,arity) = List.fold_left (fun (vl,el,i) e ->
-			let v = alloc_var ("v" ^ (string_of_int i)) tparam in
+			let v = alloc_var ("v" ^ (string_of_int i)) tparam null_pos in
 			let e = Expr.mk_binop OpAssign (mk (TArray(eloc,Expr.mk_int gen.gcom i p)) tparam p) (mk (TLocal v) v.v_type p) tparam p in
 			(v :: vl,e :: el,i + 1)
 		) ([],[eret],0) el in
@@ -1597,7 +1597,7 @@ module ExprTransformation = struct
 			let epopassign = mk (TVar (loc,Some epop)) gen.gcon.com.basic.tvoid p in
 			let ec1,found = Expr.insert_expr (gen.map e1) true (fun e ->
 				match e.eexpr with
-				| TReturn _ | TBreak _ | TContinue -> Some epop
+				| TReturn _ | TBreak | TContinue -> Some epop
 				| _ -> None
 			) in
 			let ec1 = if found then ec1 else Type.concat ec1 epop in
@@ -2500,7 +2500,7 @@ module GC = struct
 
 	(* expression generation *)
 
-	let mk_var n t = { v_id= -1;v_name=n;v_type=t;v_capture=false;v_extra=None;v_meta=[] }
+	let mk_var n t = { v_id= -1;v_name=n;v_type=t;v_capture=false;v_extra=None;v_meta=[]; v_pos=null_pos }
 
 	let get_class t = match t with TInst(c,_) -> c | _ -> assert false
 	let get_anon t = match t with TAnon(a) -> a | _ -> assert false
@@ -3955,7 +3955,7 @@ module GC = struct
 		let vars = Hashtbl.create 0 in
 		let fv v =
 			try Hashtbl.find vars v.v_id with Not_found ->
-			let v2 = Type.alloc_var v.v_name (ft v.v_type) in
+			let v2 = Type.alloc_var v.v_name (ft v.v_type) v.v_pos in
 			v2.v_meta <- v.v_meta;
 			Hashtbl.add vars v.v_id v2;
 			v2
@@ -4906,7 +4906,7 @@ let rec generate_call ctx e need_val e1 el = match e1.eexpr,el with
 			| _ -> assert false
 		in
 		let n = (mk_runtime_prefix "initInstance") in
-		let e = Expr.mk_static_call_2 csup n ((Expr.mk_local (alloc_var "this" e1.etype) e1.epos) :: el) e1.epos in
+		let e = Expr.mk_static_call_2 csup n ((Expr.mk_local (alloc_var "this" e1.etype null_pos) e1.epos) :: el) e1.epos in
 		generate_expr ctx false e
 	| _ ->
 		generate_expr ctx true e1;
@@ -5176,7 +5176,7 @@ let generate_function_header ctx c cf stat =
 		| None ->
 			assert false
 		| Some e ->
-			print_endline ((s_type_path c.cl_path) ^ "." ^ cf.cf_name ^ ": " ^ (s_expr_pretty "" (Type.s_type (print_context())) e));
+			print_endline ((s_type_path c.cl_path) ^ "." ^ cf.cf_name ^ ": " ^ (s_expr_pretty false "" (Type.s_type (print_context())) e));
 			assert false
 	in
 	(match c.cl_path with
@@ -5768,7 +5768,7 @@ let initialize_constructor con c cf =
 			let e_size = Expr.mk_ccode con (Printf.sprintf "sizeof(%s)" (path_to_name c.cl_path)) p in
 			Expr.mk_static_call_2 con.hxc.c_cstdlib "calloc" [Expr.mk_int con.com 1 p;e_size] p
 		in
-		let v_this = alloc_var "this" t_class in
+		let v_this = alloc_var "this" t_class null_pos in
 		let e_this = Expr.mk_local v_this p in
 		let el_vt = try
 			let cf_vt = PMap.find (mk_runtime_prefix "vtable") c.cl_fields in
