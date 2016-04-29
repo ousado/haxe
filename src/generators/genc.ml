@@ -604,7 +604,8 @@ module Wrap = struct
 	let wrap_function hxc ethis efunc =
 		let c,t = match hxc.t_closure efunc.etype with TInst(c,_) as t -> c,t | _ -> assert false in
 		let cf_func = PMap.find "_func" c.cl_fields in
-		mk (TNew(c,[efunc.etype],[Expr.mk_cast efunc cf_func.cf_type;ethis])) t efunc.epos
+		let e = mk (TNew(c,[efunc.etype],[Expr.mk_cast efunc cf_func.cf_type;ethis])) t efunc.epos in
+		mk (TMeta( ((Meta.Custom "Closure"),[],e.epos), e)) t e.epos
 		(*
 		let efunc = { efunc with etype = Expr.prepend_tp_arg_type hxc efunc.etype } in
 		(match c.cl_constructor with
@@ -3378,13 +3379,14 @@ module GC = struct
 			let _has_tp = (PMap.find "_has_tp" clo_class.cl_fields) in
 			let econd = mk (TField(e1,FInstance(clo_class,List.map (fun (_,t) -> t) clo_class.cl_params,_has_tp))) ctx.gc_con.com.basic.tbool null_pos in
 			{ te with eexpr = TIf(econd,_add_tp_info_arg_callsite ctx te e1 el None, Some te) }
+		(* | TMeta((Custom "Closure",_,_),TNew(c,ctps,el)) -> *)
 		| TNew(c,ctps,el) ->
 			(* for now we pass both class TPs and constructor TPs in the same argument,
 				(and nobody uses constructor TPs anyway) this is a little convoluted - *)
 			let cf = match c.cl_constructor with Some cf -> cf | _ -> assert false in
 			(match ctps,cf.cf_params with
-				| ( [],[])        ->   te
-				| (ctps,ftps)        ->   (* just constructor TPs *)
+				| ( [],[]) ->  te
+				| (ctps,ftps) ->   (* just constructor TPs *)
 					p_info ctx ("add new info, calling " ^ cf.cf_name ^ " of " ^ (s_type_path c.cl_path));
 					let e_tpinfo =  _add_tp_info_arg_known ctx (Some(cf,te.etype,el)) ctps in
 					{ te with eexpr = TNew(c,ctps, (e_tpinfo :: el) ) }
@@ -3591,8 +3593,6 @@ module GC = struct
 		This has to be thoroughly tested with various C compilers, 32 bit also is a TODO.
 	*)
 
-
-
 	let pt_super_chain pt =
     	let rec loop pt acc = (match pt.pt_super with
     		| Some(pt) -> loop pt (pt :: acc)
@@ -3667,7 +3667,8 @@ module GC = struct
 				let pt_head = (match pt.pt_type with
 				| TInst _ -> pt_ctx_get_type_by_string tctx "c.gc.ClassHeader"
 				| TEnum _ -> pt_ctx_get_type_by_string tctx "c.gc.EnumHeader"
-				| TAnon _ -> pt_ctx_get_type_by_string tctx "c.gc.AnonHeader" | _ -> assert false)
+				| TAnon _ -> pt_ctx_get_type_by_string tctx "c.gc.AnonHeader"
+				| _ -> assert false)
 				in pt_head.pt_field_types, pt_head.t_field_types
 		in
 		pt.pt_header_field_types <- hd_pts;
@@ -3675,8 +3676,6 @@ module GC = struct
 		()
 
 	let ref_kind pt offs = (if pt.pt_is_valref then (RT_vref offs) else (RT_ref offs))
-
-
 
 	let _get_struct_tp t = (match t with
 		| TAbstract({a_path=(["c"],("Struct"))},[t]) -> t
@@ -4688,6 +4687,16 @@ let rec s_type ctx t =
 	| TAbstract({a_path = ["c"],"FunctionPointer"},[TFun(args,ret) as t]) ->
 		add_type_dependency ctx (ctx.con.hxc.t_closure t);
 		Printf.sprintf "%s (*)(%s)" (s_type ctx ret) (String.concat "," (List.map (fun (_,_,t) -> s_type ctx t) args))
+	| TAbstract({a_path = ["c"],"FunctionPointer"},t2) -> (* all this should never happen *)
+		let t2 = List.map follow t2 in
+		(match t2 with
+			| [TFun(args,ret) as t] ->
+				add_type_dependency ctx (ctx.con.hxc.t_closure t);
+				Printf.sprintf "%s (*)(%s)" (s_type ctx ret) (String.concat "," (List.map (fun (_,_,t) -> s_type ctx t) args))
+			| _ ->
+				print_endline ( Printf.sprintf "####### FunctionPointer what is t2 please??!!? %s " (String.concat "::" (List.map (Type.s_type (print_context())) t2)));
+				"void (*)()"
+		)
 	| TAbstract({a_path = ["c"],"Struct"},[t]) ->
 		(match t with
 		| TInst (c,_) ->
@@ -4742,7 +4751,9 @@ let rec s_type ctx t =
 		let t = ctx.con.hxc.t_closure t in
 		add_type_dependency ctx t;
 		s_type ctx t
-	| _ -> "void*"
+	| _ ->
+		print_endline ( Printf.sprintf "####### generating void* for %s !!" (Type.s_type (print_context()) t));
+		"void*"
 
 let rec s_type_with_name ctx t n =
 	match follow t with
@@ -4755,9 +4766,15 @@ let rec s_type_with_name ctx t n =
 			| TInst({cl_kind = KTypeParameter _},_) -> "char* " ^ n (* TODO: ??? *)
 			| _ -> (s_type_with_name ctx t ("*" ^ n))
 		end
-	| TAbstract({a_path = ["c"],"FunctionPointer"},[TFun(args,ret) as t]) ->
-		add_type_dependency ctx (ctx.con.hxc.t_closure t);
-		Printf.sprintf "%s (*%s)(%s)" (s_type ctx ret) (escape_name n) (String.concat "," (List.map (fun (_,_,t) -> s_type ctx t) args))
+	| TAbstract({a_path = ["c"],"FunctionPointer"},tl) ->
+		let tl = List.map follow tl in (match tl with
+			| [TFun(args,ret) as t] ->
+				add_type_dependency ctx (ctx.con.hxc.t_closure t);
+				Printf.sprintf "%s (*%s)(%s)" (s_type ctx ret) (escape_name n) (String.concat "," (List.map (fun (_,_,t) -> s_type ctx t) args))
+			| _ ->
+				print_endline ( Printf.sprintf "####### FunctionPointer what is this please??!!? %s " (String.concat "::" (List.map (Type.s_type (print_context())) tl)));
+				assert false;
+		)
 	| TAbstract({a_path = ["c"],"ConstSizeArray"},[t;const]) ->
 		let size = match follow const with
 			| TInst({ cl_path=[],name },_) when String.length name > 1 && String.get name 0 = 'I' ->

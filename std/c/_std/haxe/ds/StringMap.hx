@@ -27,7 +27,7 @@ class StringMap<T> implements Map.IMap<String,T> {
 	var tree:haxe.ds.BalancedTree<String, T>;
 	
 	public inline function new() {
-		tree = new haxe.ds.BalancedTree<String, T>(untyped String.compare);
+		tree = new haxe.ds.BalancedTree<String, T>(@:privateAccess String.compare);
 	}
 
 	/**
