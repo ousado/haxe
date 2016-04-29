@@ -517,9 +517,15 @@ type analyzer_context = {
 	config : AnalyzerConfig.t;
 	graph : Graph.t;
 	temp_var_name : string;
+	class_and_field : (tclass * tclass_field) option;
 	mutable entry : BasicBlock.t;
 	mutable has_unbound : bool;
 	mutable loop_counter : int;
 	mutable loop_stack : int list;
 	mutable debug_exprs : (string * texpr) list;
 }
+
+module type GeneratorPlugin = sig
+	val apply : analyzer_context -> unit
+end
+

@@ -58,7 +58,7 @@ MODULES=json syntax/ast typing/type syntax/lexer typing/common generators/genxml
 	generators/genswf generators/genjava generators/gencs generators/genpy macro/interp generators/genhl \
 	generators/genlua \
 	optimization/dce optimization/analyzerConfig optimization/analyzerTypes optimization/analyzerTexpr \
-	optimization/analyzerTexprTransformer optimization/analyzer \
+	optimization/analyzerTexprTransformer optimization/analyzerPlugins optimization/analyzer \
 	optimization/filters typing/typer typing/matcher version main
 
 ADD_REVISION?=0
@@ -173,7 +173,9 @@ src/macro/interp.$(MODULE_EXT): src/typing/typecore.$(MODULE_EXT) src/typing/typ
 
 # optimization
 
-src/optimization/analyzer.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/optimization/analyzerConfig.$(MODULE_EXT) src/optimization/analyzerTypes.$(MODULE_EXT) src/optimization/analyzerTexpr.$(MODULE_EXT) src/optimization/analyzerTexprTransformer.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT)
+src/optimization/analyzer.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/optimization/analyzerConfig.$(MODULE_EXT) src/optimization/analyzerTypes.$(MODULE_EXT) src/optimization/analyzerPlugins.$(MODULE_EXT) src/optimization/analyzerTexpr.$(MODULE_EXT) src/optimization/analyzerTexprTransformer.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT)
+
+src/optimization/analyzerPlugins.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/optimization/analyzerConfig.$(MODULE_EXT) src/optimization/analyzerTypes.$(MODULE_EXT)
 
 src/optimization/analyzerConfig.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT)
 

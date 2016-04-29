@@ -1106,7 +1106,7 @@ module Run = struct
 		timer();
 		r
 
-	let create_analyzer_context com config e =
+	let create_analyzer_context com config e ccf =
 		let g = Graph.create e.etype e.epos in
 		let ctx = {
 			com = com;
@@ -1115,6 +1115,7 @@ module Run = struct
 			(* For CPP we want to use variable names which are "probably" not used by users in order to
 			   avoid problems with the debugger, see https://github.com/HaxeFoundation/hxcpp/issues/365 *)
 			temp_var_name = (match com.platform with Cpp -> "_hx_tmp" | _ -> "tmp");
+			class_and_field = ccf;
 			entry = g.g_unreachable;
 			has_unbound = false;
 			loop_counter = 0;
@@ -1178,13 +1179,14 @@ module Run = struct
 			if actx.config.copy_propagation then with_timer "analyzer-copy-propagation" (fun () -> CopyPropagation.apply actx);
 			if actx.config.code_motion then with_timer "analyzer-code-motion" (fun () -> CodeMotion.apply actx);
 			with_timer "analyzer-local-dce" (fun () -> LocalDce.apply actx);
+			AnalyzerPlugins.apply actx;
 		end;
 		back_again actx is_real_function
 
 	let run_on_field ctx config c cf = match cf.cf_expr with
 		| Some e when not (is_ignored cf.cf_meta) && not (Codegen.is_removable_field ctx cf) ->
 			let config = update_config_from_meta ctx.Typecore.com config cf.cf_meta in
-			let actx = create_analyzer_context ctx.Typecore.com config e in
+			let actx = create_analyzer_context ctx.Typecore.com config e (Some(c,cf)) in
 			let debug() =
 				prerr_endline (Printf.sprintf "While analyzing %s.%s" (s_type_path c.cl_path) cf.cf_name);
 				List.iter (fun (s,e) ->
@@ -1231,7 +1233,7 @@ module Run = struct
 			| Some e ->
 				let tf = { tf_args = []; tf_type = e.etype; tf_expr = e; } in
 				let e = mk (TFunction tf) (tfun [] e.etype) e.epos in
-				let actx = create_analyzer_context ctx.Typecore.com {config with optimize = false} e in
+				let actx = create_analyzer_context ctx.Typecore.com {config with optimize = false} e None in
 				let e = run_on_expr actx e in
 				let e = match e.eexpr with
 					| TFunction tf -> tf.tf_expr
@@ -1257,6 +1259,6 @@ module Run = struct
 end
 ;;
 Typecore.analyzer_run_on_expr_ref := (fun com e ->
-	let actx = Run.create_analyzer_context com (AnalyzerConfig.get_base_config com) e in
+	let actx = Run.create_analyzer_context com (AnalyzerConfig.get_base_config com) e None in
 	Run.run_on_expr actx e
 )
