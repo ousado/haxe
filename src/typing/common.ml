@@ -100,6 +100,7 @@ type display_mode =
 	| DMResolve of string
 	| DMType
 	| DMModuleSymbols
+	| DMDiagnostics
 
 type compiler_callback = {
 	mutable after_typing : (module_type list -> unit) list;
@@ -107,10 +108,20 @@ type compiler_callback = {
 	mutable after_generation : (unit -> unit) list;
 }
 
+type display_information = {
+	mutable import_positions : (pos,bool ref) PMap.t;
+}
+
+(* This information is shared between normal and macro context. *)
+type shared_context = {
+	display_information : display_information;
+}
+
 type context = {
 	(* config *)
 	version : int;
 	args : string list;
+	shared : shared_context;
 	mutable sys_args : string list;
 	mutable display : display_mode;
 	mutable debug : bool;
@@ -523,6 +534,7 @@ module MetaInfo = struct
 		| StructAccess -> ":structAccess",("Marks an extern class as using struct access('.') not pointer('->')",[Platform Cpp; UsedOn TClass])
 		| StructInit -> ":structInit",("Allows to initialize the class with a structure that matches constructor parameters",[UsedOn TClass])
 		| SuppressWarnings -> ":suppressWarnings",("Adds a SuppressWarnings annotation for the generated Java class",[Platform Java; UsedOn TClass])
+		| TemplatedCall -> ":templatedCall",("Indicates that the first parameter of static call should be treated as a template arguement",[Platform Cpp; UsedOn TClassField])
 		| Throws -> ":throws",("Adds a 'throws' declaration to the generated function",[HasParam "Type as String"; Platform Java; UsedOn TClassField])
 		| This -> ":this",("Internally used to pass a 'this' expression to macros",[Internal; UsedOn TExpr])
 		| To -> ":to",("Specifies that the field of the abstract is a cast operation to the type identified in the function",[UsedOn TAbstractField])
@@ -700,6 +712,11 @@ let create version s_version args =
 	{
 		version = version;
 		args = args;
+		shared = {
+			display_information = {
+				import_positions = PMap.empty;
+			}
+		};
 		sys_args = args;
 		debug = false;
 		display = !display_default;

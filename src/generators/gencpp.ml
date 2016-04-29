@@ -21,8 +21,6 @@ open Ast
 open Type
 open Common
 
-let unsupported p = error "This expression cannot be generated to Cpp" p
-
 (*
    Generators do not care about non-core-type abstracts, so let us follow them
    away by default.
@@ -607,13 +605,6 @@ let is_objc_class klass =
 let is_objc_type t = match follow t with
   | TInst(cl,_) -> cl.cl_extern && Meta.has Meta.Objc cl.cl_meta
   | _ -> false
-;;
-
-
-let is_sizeof_call func =
-   match (remove_parens func).eexpr with
-   | TField (_,FStatic ({cl_path=["cpp"],"Stdlib"},{cf_name="sizeof"} ) ) -> true
-   | _ -> false
 ;;
 
 
@@ -1388,6 +1379,7 @@ and tcppfuncloc =
    | FuncThis of tclass_field
    | FuncInstance of tcppexpr * bool * tclass_field
    | FuncStatic of tclass * bool * tclass_field
+   | FuncTemplate of tclass * tclass_field * path * bool
    | FuncInterface of tcppexpr * tclass * tclass_field
    | FuncEnumConstruct of tenum * tenum_field
    | FuncSuperConstruct
@@ -1397,7 +1389,6 @@ and tcppfuncloc =
    | FuncInternal of tcppexpr * string * string
    | FuncGlobal of string
    | FuncFromStaticFunction
-   | FuncSizeof
 
 and tcpparrayloc =
    | ArrayTyped of tcppexpr * tcppexpr
@@ -1433,7 +1424,6 @@ and tcpp_expr_expr =
    | CppEnumField of tenum * tenum_field
    | CppCall of tcppfuncloc * tcppexpr list
    | CppFunctionAddress of tclass * tclass_field
-   | CppSizeof of path * bool
    | CppArray of tcpparrayloc
    | CppCrement of  tcppcrementop * Ast.unop_flag * tcpplvalue
    | CppSet of tcpplvalue * tcppexpr
@@ -1498,6 +1488,7 @@ let rec s_tcpp = function
        (if objC then "CppCallObjCInstance" else "CppCallInstance(") ^ tcpp_to_string obj.cpptype ^ "," ^ field.cf_name ^ ")"
    | CppCall (FuncInterface  _,_) -> "CppCallInterface"
    | CppCall (FuncStatic  (_,objC,_),_) -> if objC then "CppCallStaticObjC" else "CppCallStatic"
+   | CppCall (FuncTemplate  _,_) -> "CppCallTemplate"
    | CppCall (FuncEnumConstruct _,_) -> "CppCallEnumConstruct"
    | CppCall (FuncSuperConstruct,_) -> "CppCallSuperConstruct"
    | CppCall (FuncSuper _,_) -> "CppCallSuper"
@@ -1506,10 +1497,8 @@ let rec s_tcpp = function
    | CppCall (FuncInternal _,_) -> "CppCallInternal"
    | CppCall (FuncGlobal _,_) -> "CppCallGlobal"
    | CppCall (FuncFromStaticFunction,_) -> "CppCallFromStaticFunction"
-   | CppCall (FuncSizeof,_) -> "CppCallSizeof"
 
    | CppFunctionAddress  _ -> "CppFunctionAddress"
-   | CppSizeof  _ -> "CppSizeof"
    | CppArray  _ -> "CppArray"
    | CppCrement  _ -> "CppCrement"
    | CppSet  _ -> "CppSet"
@@ -1964,9 +1953,21 @@ let ctx_arg ctx name default_val arg_type prefix =
    (fst pair) ^ " " ^ (snd pair);;
 
 
+(* Generate prototype text, including allowing default values to be null *)
+let ctx_arg_name ctx name default_val arg_type prefix =
+   let pair = ctx_arg_type_name ctx name default_val arg_type prefix in
+   (snd pair);;
+
+
 let ctx_arg_list ctx arg_list prefix =
    String.concat "," (List.map (fun (v,o) -> (ctx_arg ctx v.v_name o v.v_type prefix) ) arg_list)
 
+let ctx_arg_list_name ctx arg_list prefix =
+   String.concat "," (List.map (fun (v,o) -> (ctx_arg_name ctx v.v_name o v.v_type prefix) ) arg_list)
+
+let cpp_arg_names args =
+   String.concat "," (List.map (fun (name,_,_) -> keyword_remap name) args)
+;;
 
 let rec ctx_tfun_arg_list ctx include_names arg_list =
    let oType o arg_type =
@@ -2065,6 +2066,21 @@ let cpp_member_name_of member =
    else
       keyword_remap member.cf_name
 ;;
+
+let cpp_is_templated_call ctx member =
+   has_meta_key member.cf_meta Meta.TemplatedCall
+;;
+
+let cpp_template_param path native =
+   let path = "::" ^ (join_class_path_remap (path) "::" ) in
+   if (native) then
+      path
+   else if (path="::Array") then
+      "hx::ArrayBase"
+   else
+      path
+;;
+
 
 
 let cpp_append_block block expr =
@@ -2281,11 +2297,6 @@ let retype_expression ctx request_type function_args expression_tree forInjectio
                let exprType = cpp_type_of member.cf_type in
                CppFunction( FuncFromStaticFunction, funcReturn ), exprType
 
-            | FStatic ( {cl_path=(["cpp"],"Stdlib")}, ({cf_name="sizeof"} as member) ) ->
-               let funcReturn = cpp_member_return_type ctx member in
-               let exprType = cpp_type_of member.cf_type in
-               CppFunction( FuncSizeof, funcReturn ), exprType
-
             | FStatic (clazz,member) ->
                let funcReturn = cpp_member_return_type ctx member in
                let exprType = cpp_type_of member.cf_type in
@@ -2371,17 +2382,18 @@ let retype_expression ctx request_type function_args expression_tree forInjectio
                       CppFunctionAddress(clazz,member), funcReturn
                    | _ -> error "cpp.Function.fromStaticFunction must be called on static function" expr.epos;
                    )
-               |  CppFunction(FuncSizeof ,returnType) ->
-                   ( match retypedArgs with
-                   | [ {cppexpr=CppClassOf(path,native)} ] ->
-                      CppSizeof(path,native), returnType
-                   | _ -> error "cpp.Stdlib.sizeof must be called on a type name" expr.epos;
-                   )
                |  CppEnumIndex(_) ->
                      (* Not actually a TCall...*)
                      retypedFunc.cppexpr, retypedFunc.cpptype
                |  CppFunction( FuncInstance(obj, false, member), args ) when return_type=TCppVoid && is_array_splice_call obj member ->
                      CppCall( FuncInstance(obj, false, {member with cf_name="removeRange"}), retypedArgs), TCppVoid
+               |  CppFunction( FuncStatic(obj, false, member), returnType ) when cpp_is_templated_call ctx member ->
+                     (match retypedArgs with
+                     | {cppexpr = CppClassOf(path,native) }::rest ->
+                         CppCall( FuncTemplate(obj,member,path,native), rest), returnType
+                     | _ -> error "First parameter of template function must be a Class" retypedFunc.cpppos
+                     )
+               (* Other functions ... *)
                |  CppFunction(func,returnType) ->
                      CppCall(func,retypedArgs), returnType
                |  CppEnumField(enum, field) ->
@@ -2882,7 +2894,7 @@ let gen_cpp_ast_expression_tree ctx class_name func_name function_args injection
          | FuncNew _ -> error "Can't create new closure" expr.cpppos
          | FuncEnumConstruct _ -> error "Enum constructor outside of CppCall" expr.cpppos
          | FuncFromStaticFunction -> error "Can't create cpp.Function.fromStaticFunction closure" expr.cpppos
-         | FuncSizeof -> error "Can't create cpp.Stdlib.sizeof closure" expr.cpppos
+         | FuncTemplate _ -> error "Can't create template function closure" expr.cpppos
          );
       | CppCall( FuncInterface(expr,clazz,field), args) when not (is_native_gen_class clazz)->
          out ( cpp_class_name clazz ^ "::" ^ cpp_member_name_of field ^ "(");
@@ -2945,10 +2957,21 @@ let gen_cpp_ast_expression_tree ctx class_name func_name function_args injection
               end else
                  (out (cpp_class_name clazz); out ("::" ^ (cpp_member_name_of field) ))
 
+         | FuncTemplate(clazz,field,tpath,native) ->
+              let rename = get_meta_string field.cf_meta Meta.Native in
+              if rename<>"" then begin
+                 (* This is the case if you use @:native('new foo').  c++ wil group the space undesirably *)
+                 if String.contains rename ' ' then begin
+                    out "(";
+                    closeCall := ")"
+                 end;
+                 out rename
+              end else
+                 (out (cpp_class_name clazz); out ("::" ^ (cpp_member_name_of field) ));
+              out ("< " ^ (cpp_template_param tpath native) ^ "  >")
+
          | FuncFromStaticFunction ->
               error "Unexpected FuncFromStaticFunction" expr.cpppos
-         | FuncSizeof ->
-              error "Unexpected FuncSizeof" expr.cpppos
          | FuncEnumConstruct(enum,field) ->
             out ((string_of_path enum.e_path) ^ "::" ^ (cpp_enum_name_of field));
 
@@ -2995,16 +3018,6 @@ let gen_cpp_ast_expression_tree ctx class_name func_name function_args injection
          out ("::cpp::Function< " ^ signature ^">(hx::AnyCast(");
          out ("&::" ^(join_class_path_remap klass.cl_path "::")^ "_obj::" ^ name );
          out " ))"
-      | CppSizeof(path,native) ->
-         out ("hx::ClassSizeOf< ");
-         let path = "::" ^ (join_class_path_remap (path) "::" ) in
-         if (native) then
-            out path
-         else if (path="::Array") then
-            out "hx::ArrayBase"
-         else
-            out path;
-         out  " >()";
 
       | CppGlobal(name) ->
          out ("::" ^ name)
@@ -3589,8 +3602,23 @@ let field_arg_count field =
       | _,_ -> -1
 ;;
 
+let native_field_name_remap is_static field =
+   let remap_name = keyword_remap field.cf_name in
+   if not is_static then
+      remap_name
+   else begin
+      let nativeImpl = get_meta_string field.cf_meta Meta.Native in 
+      if nativeImpl<>"" then begin
+         let r = Str.regexp "^[a-zA-Z_0-9]+$" in
+            if Str.string_match r remap_name 0 then
+               "_hx_" ^ remap_name
+            else
+               "_hx_f" ^ (gen_hash 0 remap_name)
+      end else
+         remap_name
+   end
+;;
 
-            (* external mem  Dynamic & *)
 
 let gen_field ctx class_def class_name ptr_name dot_name is_static is_interface field =
    let output = ctx.ctx_output in
@@ -3612,6 +3640,8 @@ let gen_field ctx class_def class_name ptr_name dot_name is_static is_interface 
 
       if (not (is_dynamic_haxe_method field)) then begin
          (* The actual function definition *)
+         let nativeImpl = get_meta_string field.cf_meta Meta.Native in 
+         let remap_name = native_field_name_remap is_static field in
          output (if is_void then "void" else return_type );
          output (" " ^ class_name ^ "::" ^ remap_name ^ "(" );
          output (ctx_arg_list ctx function_def.tf_args "__o_");
@@ -3620,7 +3650,12 @@ let gen_field ctx class_def class_name ptr_name dot_name is_static is_interface 
          let code = (get_code field.cf_meta Meta.FunctionCode) in
          let tail_code = (get_code field.cf_meta Meta.FunctionTailCode) in
 
-         gen_cpp_function_body ctx class_def is_static field.cf_name function_def code tail_code;
+         if nativeImpl<>"" && is_static then begin
+            output " {\n";
+            output ("\t" ^ ret ^ "::" ^ nativeImpl ^ "(" ^ (ctx_arg_list_name ctx function_def.tf_args "__o_") ^ ");\n");
+            output "}\n\n";
+         end else
+            gen_cpp_function_body ctx class_def is_static field.cf_name function_def code tail_code;
 
          output "\n\n";
          let nonVirtual = has_meta_key field.cf_meta Meta.NonVirtual in
@@ -3710,9 +3745,6 @@ let has_field_init field =
    | _ -> false
 ;;
 
-let cpp_arg_names args =
-   String.concat "," (List.map (fun (name,_,_) -> keyword_remap name) args)
-;;
 
 let gen_member_def ctx class_def is_static is_interface field =
    let output = ctx.ctx_output in
@@ -3774,6 +3806,7 @@ let gen_member_def ctx class_def is_static is_interface field =
             end;
             output (if return_type="Void" then "void" else return_type );
 
+            let remap_name = native_field_name_remap is_static field in
             output (" " ^ remap_name ^ "(" );
             output (ctx_arg_list ctx function_def.tf_args "" );
             output ");\n";
@@ -4989,7 +5022,8 @@ let generate_class_files baseCtx super_deps constructor_deps class_def inScripta
                | Var { v_read = AccCall } when is_extern_field f -> "if (" ^ (checkPropCall f) ^ ") { outValue = " ^(keyword_remap ("get_" ^ f.cf_name)) ^ "(); return true; }"
                | Var { v_read = AccCall } -> "outValue = " ^ (checkPropCall f) ^ " ? " ^ (keyword_remap ("get_" ^ f.cf_name)) ^ "() : " ^
                      ((keyword_remap f.cf_name) ^ if (variable_field f) then "" else "_dyn()") ^ "; return true;";
-               | _ -> "outValue = " ^ ((keyword_remap f.cf_name) ^ (if (variable_field f) then "" else "_dyn()") ^ "; return true;")
+               | _ when variable_field f -> "outValue = " ^ (keyword_remap f.cf_name) ^ "; return true;"
+               | _ -> "outValue = " ^ ((native_field_name_remap true f) ^ "_dyn(); return true;")
                )
             ) )
          in
@@ -5442,12 +5476,14 @@ let generate_class_files baseCtx super_deps constructor_deps class_def inScripta
 
    if (not class_def.cl_interface && not nativeGen) then begin
       output_h ("\t\t" ^ class_name ^  "();\n");
-      output_h ("\t\tvoid __construct(" ^ constructor_type_args ^ ");\n");
       output_h "\n\tpublic:\n";
+      output_h ("\t\tvoid __construct(" ^ constructor_type_args ^ ");\n");
       let new_arg = if (has_gc_references ctx class_def) then "true" else "false" in
-      output_h ("\t\tinline void *operator new(size_t inSize, bool inContainer=" ^ new_arg
-         ^",const char *inName=" ^ (const_char_star class_name_text )^ ")\n" );
+      let name = const_char_star class_name_text in
+      output_h ("\t\tinline void *operator new(size_t inSize, bool inContainer=" ^ new_arg ^",const char *inName=" ^name^ ")\n" );
       output_h ("\t\t\t{ return hx::Object::operator new(inSize,inContainer,inName); }\n" );
+      output_h ("\t\tinline void *operator new(size_t inSize, int extra)\n" );
+      output_h ("\t\t\t{ return hx::Object::operator new(inSize+extra," ^ new_arg ^ "," ^ name ^ "); }\n" );
       output_h ("\t\tstatic " ^ptr_name^ " __new(" ^constructor_type_args ^");\n");
       output_h ("\t\tstatic Dynamic __CreateEmpty();\n");
       output_h ("\t\tstatic Dynamic __Create(hx::DynamicArray inArgs);\n");

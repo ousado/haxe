@@ -414,10 +414,10 @@ let collect_toplevel_identifiers ctx =
 			) e.e_constrs;
 	in
 	List.iter enum_ctors ctx.m.curmod.m_types;
-	List.iter enum_ctors ctx.m.module_types;
+	List.iter enum_ctors (List.map fst ctx.m.module_types);
 
 	(* imported globals *)
-	PMap.iter (fun _ (mt,s) ->
+	PMap.iter (fun _ (mt,s,_) ->
 		try
 			let t = match Typeload.resolve_typedef mt with
 				| TClassDecl c -> (PMap.find s c.cl_statics).cf_type
@@ -444,10 +444,10 @@ let collect_toplevel_identifiers ctx =
 	List.iter add_type ctx.m.curmod.m_types;
 
 	(* module imports *)
-	List.iter add_type ctx.m.module_types;
+	List.iter add_type (List.map fst ctx.m.module_types);
 
 	(* module using *)
-	List.iter (fun c ->
+	List.iter (fun (c,_) ->
 		add_type (TClassDecl c)
 	) ctx.m.module_using;
 
@@ -1246,7 +1246,7 @@ let rec using_field ctx mode e i p =
 	let rec loop = function
 	| [] ->
 		raise Not_found
-	| c :: l ->
+	| (c,pc) :: l ->
 		try
 			let cf = PMap.find i c.cl_statics in
 			if Meta.has Meta.NoUsing cf.cf_meta || not (can_access ctx c cf true) then raise Not_found;
@@ -1264,6 +1264,7 @@ let rec using_field ctx mode e i p =
 						| _ -> ()
 					) monos cf.cf_params;
 					let et = type_module_type ctx (TClassDecl c) None p in
+					if ctx.is_display_file then Display.mark_import_position ctx.com pc;
 					AKUsing (mk (TField (et,FStatic (c,cf))) t p,c,cf,e)
 				| _ ->
 					raise Not_found
@@ -1373,7 +1374,7 @@ let rec type_ident_raise ctx i p mode =
 		let rec loop l =
 			match l with
 			| [] -> raise Not_found
-			| t :: l ->
+			| (t,pt) :: l ->
 				match t with
 				| TAbstractDecl ({a_impl = Some c} as a) when Meta.has Meta.Enum a.a_meta ->
 					begin try
@@ -1384,6 +1385,7 @@ let rec type_ident_raise ctx i p mode =
 							let et = type_module_type ctx (TClassDecl c) None p in
 							let fa = FStatic(c,cf) in
 							let t = monomorphs cf.cf_params cf.cf_type in
+							if ctx.is_display_file then Display.mark_import_position ctx.com pt;
 							begin match cf.cf_kind with
 								| Var {v_read = AccInline} -> AKInline(et,cf,fa,t)
 								| _ -> AKExpr (mk (TField(et,fa)) t p)
@@ -1396,7 +1398,7 @@ let rec type_ident_raise ctx i p mode =
 					loop l
 				| TTypeDecl t ->
 					(match follow t.t_type with
-					| TEnum (e,_) -> loop ((TEnumDecl e) :: l)
+					| TEnum (e,_) -> loop ((TEnumDecl e,pt) :: l)
 					| _ -> loop l)
 				| TEnumDecl e ->
 					try
@@ -1404,14 +1406,16 @@ let rec type_ident_raise ctx i p mode =
 						let et = type_module_type ctx t None p in
 						let monos = List.map (fun _ -> mk_mono()) e.e_params in
 						let monos2 = List.map (fun _ -> mk_mono()) ef.ef_params in
+						if ctx.is_display_file then Display.mark_import_position ctx.com pt;
 						wrap (mk (TField (et,FEnum (e,ef))) (enum_field_type ctx e ef monos monos2 p) p)
 					with
 						Not_found -> loop l
 		in
-		(try loop (List.rev ctx.m.curmod.m_types) with Not_found -> loop ctx.m.module_types)
+		(try loop (List.rev_map (fun t -> t,null_pos) ctx.m.curmod.m_types) with Not_found -> loop ctx.m.module_types)
 	with Not_found ->
 		(* lookup imported globals *)
-		let t, name = PMap.find i ctx.m.module_globals in
+		let t, name, pi = PMap.find i ctx.m.module_globals in
+		if ctx.is_display_file then Display.mark_import_position ctx.com pi;
 		let e = type_module_type ctx t None p in
 		type_field ctx e name p mode
 
@@ -2698,7 +2702,14 @@ and handle_efield ctx e p mode =
 					(match pack with
 					| [] ->
 						(try
-							let t = List.find (fun t -> snd (t_infos t).mt_path = name) (ctx.m.curmod.m_types @ ctx.m.module_types) in
+							let path_match t = snd (t_infos t).mt_path = name in
+							let t = try
+								List.find path_match ctx.m.curmod.m_types
+							with Not_found ->
+								let t,p = List.find (fun (t,_) -> path_match t) ctx.m.module_types in
+								if ctx.is_display_file then Display.mark_import_position ctx.com p;
+								t
+							in
 							(* if the static is not found, look for a subtype instead - #1916 *)
 							get_static true t
 						with Not_found ->
@@ -2822,7 +2833,7 @@ and type_vars ctx vl p =
 			) in
 			if v.[0] = '$' && ctx.com.display = DMNone then error "Variables names starting with a dollar are not allowed" p;
 			let v,e = add_local ctx v t pv, e in
-			if Display.is_display_position pv then
+			if ctx.in_display && Display.is_display_position pv then
 				Display.display_variable ctx.com.display v pv;
 			v,e
 		with
@@ -2843,7 +2854,7 @@ and format_string ctx s p =
 	let min = ref (p.pmin + 1) in
 	let add_expr (enext,p) len =
 		min := !min + len;
-		if ctx.in_display && Display.encloses_position !Parser.resume_display p then
+		if ctx.in_display && Display.is_display_position p then
 			raise (Display.DisplaySubExpression (enext,p));
 		match !e with
 		| None -> e := Some (enext,p)
@@ -3126,7 +3137,7 @@ and type_new ctx path el with_type p =
 		| mt ->
 			error ((s_type_path (t_infos mt).mt_path) ^ " cannot be constructed") p
 	in
-	if Display.is_display_position (pos path) then Display.display_type ctx.com.display t (pos path);
+	if ctx.in_display && Display.is_display_position (pos path) then Display.display_type ctx.com.display t (pos path);
 	let build_constructor_call c tl =
 		let ct, f = get_constructor ctx c tl p in
 		if (Meta.has Meta.CompilerGenerated f.cf_meta) then display_error ctx (s_type_path c.cl_path ^ " does not have a constructor") p;
@@ -3220,7 +3231,7 @@ and type_try ctx e1 catches with_type p =
 		check_unreachable acc t2 (pos e);
 		let locals = save_locals ctx in
 		let v = add_local ctx v t pv in
-		if Display.is_display_position pv then
+		if ctx.is_display_file && Display.is_display_position pv then
 			Display.display_variable ctx.com.display v pv;
 		let e = type_expr ctx e with_type in
 		v.v_type <- t2;
@@ -3870,7 +3881,7 @@ and handle_display ctx e_ast iscall with_type =
 		raise (Display.DisplayPosition pl);
 	| DMToplevel ->
 		collect_toplevel_identifiers ctx;
-	| DMDefault | DMNone | DMModuleSymbols ->
+	| DMDefault | DMNone | DMModuleSymbols | DMDiagnostics ->
 		let opt_args args ret = TFun(List.map(fun (n,o,t) -> n,true,t) args,ret) in
 		let e,tl_overloads,doc = match e.eexpr with
 			| TField (e1,fa) ->
@@ -3934,7 +3945,7 @@ and handle_display ctx e_ast iscall with_type =
 				loop c params
 			| TAbstract({a_impl = Some c} as a,pl) ->
 				if Meta.has Meta.CoreApi c.cl_meta then merge_core_doc c;
-				ctx.m.module_using <- c :: ctx.m.module_using;
+				ctx.m.module_using <- (c,null_pos) :: ctx.m.module_using;
 				let fields = try
 					let _,el,_ = Meta.get Meta.Forward a.a_meta in
 					let sl = ExtList.List.filter_map (fun e -> match fst e with
@@ -3989,7 +4000,7 @@ and handle_display ctx e_ast iscall with_type =
 		*)
 		let rec loop acc = function
 			| [] -> acc
-			| c :: l ->
+			| (c,_) :: l ->
 				let acc = ref (loop acc l) in
 				let rec dup t = Type.map dup t in
 				List.iter (fun f ->
@@ -4733,7 +4744,7 @@ let make_macro_api ctx p =
 			ctx.curfield.cf_name;
 		);
 		Interp.get_local_using = (fun() ->
-			ctx.m.module_using;
+			List.map fst ctx.m.module_using;
 		);
 		Interp.get_local_imports = (fun() ->
 			ctx.m.module_imports;
@@ -4779,7 +4790,7 @@ let make_macro_api ctx p =
 			let mpath = Ast.parse_path m in
 			begin try
 				let m = Hashtbl.find ctx.g.modules mpath in
-				Typeload.type_types_into_module ctx m types pos
+				ignore(Typeload.type_types_into_module ctx m types pos)
 			with Not_found ->
 				let mnew = Typeload.type_module ctx mpath ctx.m.curmod.m_extra.m_file types pos in
 				mnew.m_extra.m_kind <- MFake;
@@ -4922,6 +4933,7 @@ let get_macro_context ctx p =
 		Common.define com2 Define.Macro;
 		Common.init_platform com2 Neko;
 		let mctx = ctx.g.do_create com2 in
+		mctx.is_display_file <- ctx.is_display_file;
 		create_macro_interp ctx mctx;
 		api, mctx
 
@@ -4984,7 +4996,7 @@ let type_macro ctx mode cpath f (el:Ast.expr list) p =
 	let expr = Typeload.load_instance mctx (ctexpr,null_pos) false p in
 	(match mode with
 	| MDisplay ->
-		()
+		raise Exit (* We don't have to actually call the macro. *)
 	| MExpr ->
 		unify mctx mret expr mpos;
 	| MBuild ->
@@ -5224,6 +5236,7 @@ let rec create com =
 			wildcard_packages = [];
 			module_imports = [];
 		};
+		is_display_file = false;
 		meta = [];
 		this_stack = [];
 		with_type_stack = [];
@@ -5252,7 +5265,7 @@ let rec create com =
 		Error (Module_not_found ([],"StdTypes"),_) -> error "Standard library not found" null_pos
 	);
 	(* We always want core types to be available so we add them as default imports (issue #1904 and #3131). *)
-	ctx.m.module_types <- ctx.g.std.m_types;
+	ctx.m.module_types <- List.map (fun t -> t,null_pos) ctx.g.std.m_types;
 	List.iter (fun t ->
 		match t with
 		| TAbstractDecl a ->
@@ -5301,11 +5314,11 @@ let rec create com =
 	with Exit -> ());
 	let m = Typeload.load_module ctx (["haxe"],"EnumTools") null_pos in
 	(match m.m_types with
-	| [TClassDecl c1;TClassDecl c2] -> ctx.g.global_using <- c1 :: c2 :: ctx.g.global_using
+	| [TClassDecl c1;TClassDecl c2] -> ctx.g.global_using <- (c1,c1.cl_pos) :: (c2,c2.cl_pos) :: ctx.g.global_using
 	| [TClassDecl c1] ->
 		let m = Typeload.load_module ctx (["haxe"],"EnumValueTools") null_pos in
 		(match m.m_types with
-		| [TClassDecl c2 ] -> ctx.g.global_using <- c1 :: c2 :: ctx.g.global_using
+		| [TClassDecl c2 ] -> ctx.g.global_using <- (c1,c1.cl_pos) :: (c2,c2.cl_pos) :: ctx.g.global_using
 		| _ -> assert false);
 	| _ -> assert false);
 	ctx

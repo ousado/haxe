@@ -1286,6 +1286,9 @@ try
 					| "module-symbols" ->
 						Common.define com Define.NoCOpt;
 						DMModuleSymbols;
+					| "diagnostics" ->
+						Common.define com Define.NoCOpt;
+						DMDiagnostics;
 					| "" ->
 						DMDefault
 					| _ ->
@@ -1579,9 +1582,12 @@ try
 		Typer.finalize tctx;
 		t();
 		if ctx.has_error then raise Abort;
-		if not (Display.requires_full_typing ctx.com.display) then begin
-			if ctx.has_next then raise Abort;
-			failwith "No completion point was found";
+		begin match ctx.com.display with
+			| DMNone | DMUsage ->
+				()
+			| _ ->
+				if ctx.has_next then raise Abort;
+				failwith "No completion point was found";
 		end;
 		let t = Common.timer "filters" in
 		let main, types, modules = Typer.generate tctx in
@@ -1840,7 +1846,7 @@ with
 				raise (Completion c)
 			| _ ->
 				error ctx ("Could not load module " ^ (Ast.s_type_path (p,c))) Ast.null_pos)
-	| Display.ModuleSymbols s ->
+	| Display.ModuleSymbols s | Display.Diagnostics s ->
 		raise (Completion s)
 	| Interp.Sys_exit i ->
 		ctx.flush();

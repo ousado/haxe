@@ -180,6 +180,7 @@ module Meta = struct
 		| To
 		| ToString
 		| Transient
+		| TemplatedCall
 		| ValueUsed
 		| Volatile
 		| Unbound
