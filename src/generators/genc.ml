@@ -2263,13 +2263,6 @@ module GC = struct
 		| GC_F_method       of tclass_field
 		| GC_F_instance_var of tclass_field
 		| GC_F_closure      of tfunc * tvar * gc_frame_ctx
-		| SC_init
-		| SC_static_var   of tclass_field
-		| SC_static_func  of tclass_field
-		| SC_constructor  of tclass_field
-		| SC_method       of tclass_field
-		| SC_instance_var of tclass_field
-		| SC_closure      of tfunc * tvar * gc_frame_ctx
 
 
 	let fold_fields acc c f =
@@ -2290,12 +2283,12 @@ module GC = struct
 			)) acc c.cl_ordered_statics in
 		let acc = (match c.cl_constructor with
 			| Some ( {cf_expr = Some(te)} as cf) ->
-				set_expr acc cf (SC_constructor cf) te
+				set_expr acc cf (GC_F_constructor cf) te
 			| _ -> acc ) in
 		let acc = List.fold_left (fun acc cf ->
 			(match cf.cf_kind,cf.cf_expr with
-				| Var _,(Some te) -> set_expr acc cf (SC_instance_var cf) te
-				| _,(Some te) ->     set_expr acc cf (SC_method cf) te
+				| Var _,(Some te) -> set_expr acc cf (GC_F_instance_var cf) te
+				| _,(Some te) ->     set_expr acc cf (GC_F_method cf) te
 				| _,_ -> acc
 			)) acc c.cl_ordered_fields in
 		acc
@@ -2303,24 +2296,24 @@ module GC = struct
 	let gc_map_field_expressions ctx tctx ectx c f =
 		let _ = begin
 		(match c.cl_init with
-			| Some te 			-> c.cl_init <- Some (f ctx tctx ectx c SC_init te)
+			| Some te 			-> c.cl_init <- Some (f ctx tctx ectx c GC_F_init te)
 			| None    			-> ()
 		);
 		List.iter (fun cf ->
 			(match cf.cf_kind,cf.cf_expr with
-				| Var _,(Some te) -> cf.cf_expr <- Some (f ctx tctx ectx c (SC_static_var cf) te)
-				| _,(Some te)     -> cf.cf_expr <- Some (f ctx tctx ectx c (SC_static_func cf) te)
+				| Var _,(Some te) -> cf.cf_expr <- Some (f ctx tctx ectx c (GC_F_static_var cf) te)
+				| _,(Some te)     -> cf.cf_expr <- Some (f ctx tctx ectx c (GC_F_static_func cf) te)
 				| _,_ -> ()
 			)) c.cl_ordered_statics;
 		(match c.cl_constructor with
 			| Some ( {cf_expr = Some(te)} as cf)
-								-> cf.cf_expr <- Some (f ctx tctx ectx c (SC_constructor cf) te)
+								-> cf.cf_expr <- Some (f ctx tctx ectx c (GC_F_constructor cf) te)
 			| _   -> ()
 		);
 		List.iter (fun cf ->
 			(match cf.cf_kind,cf.cf_expr with
-				| Var _,(Some te) -> cf.cf_expr <- Some (f ctx tctx ectx c (SC_instance_var cf) te)
-				| _,(Some te)   -> cf.cf_expr <- Some (f ctx tctx ectx c (SC_method cf) te)
+				| Var _,(Some te) -> cf.cf_expr <- Some (f ctx tctx ectx c (GC_F_instance_var cf) te)
+				| _,(Some te)   -> cf.cf_expr <- Some (f ctx tctx ectx c (GC_F_method cf) te)
 				| _,_ -> ()
 			)) c.cl_ordered_fields;
 		end
@@ -2457,13 +2450,11 @@ module GC = struct
 
 	let gmethod_filter = and_filter method_filter (fun cfb -> match (fst cfb).cf_params with [] -> false | _ -> true )
 
-	let fold_left_rev f acc xs = List.rev (List.fold_left f acc xs)
-	
-	let fold_left3 f acc a b c =
-	let rec loop acc a b c = match a,b,c with
-		| a :: ax, b :: bx, c :: cx -> loop (f acc a b c) ax bx cx
-		| _,_,_ 					-> acc
-	in loop acc a b c
+		let fold_left3 f acc a b c =
+		let rec loop acc a b c = match a,b,c with
+			| a :: ax, b :: bx, c :: cx -> loop (f acc a b c) ax bx cx
+			| _,_,_ 					-> acc
+		in loop acc a b c
 
 	let fold_left_rev3 a b c f = List.rev (fold_left3 f [] a b c)
 (*
@@ -3159,78 +3150,22 @@ module GC = struct
 
 	 *)
 
-	let get_argument_types args = List.map ( fun (_,_,t) -> t ) args
-	
-	(*let fold_tps (acc,nxt) tps = List.fold_left (fun ) *)
-	
 	let type_to_callsite_tp_info c fctx t =
 		match fctx with
 		(* in __init__ and static var initialization, there cannot be any type parameters from an outer frame *)
-		| SC_init            -> ()
+		| GC_F_init            -> ()
 
-		| SC_static_var   cf -> ()
+		| GC_F_static_var   cf -> ()
 		(* in an instance var initialization there can only be class type parameters *)
-		| SC_instance_var cf -> ()
+		| GC_F_instance_var cf -> ()
 		(* in a static function there can only be type parameters passed to the function as argument *)
-		| SC_static_func  cf -> ()
+		| GC_F_static_func  cf -> ()
 		(* in both constructor and method there can be both class and function type parameters *)
-		| SC_constructor  cf
-		| SC_method       cf -> ()
-		| SC_closure      _  -> ()
-		
-		
-	let linearize_signature t = 
-		let rec loop t = (match t with 
-			| TFun  (xs,rt) -> rt :: (get_argument_types xs)
-			| TAbstract(a,pl) when (Meta.has Meta.CoreType a.a_meta) -> []
-			| TLazy _
-			| TType _		-> loop (Type.follow t)
-			| TAbstract (a,tps) 
-							-> loop (Abstract.get_underlying_type a tps)
-			| TInst (_,tps) 
-			| TEnum (_,tps) -> tps
-			| TAnon a       -> get_xs_types (get_anon_fields a)
-			| TMono _
-			| TDynamic _    -> []) in
-		let rec loop2 acc xs = (match xs with
-			| []   -> acc
-			| more -> loop2 (acc @ xs) (List.flatten (List.map loop more))
-		) in ( match t with
-		| TFun  _ -> loop2 [] (loop t)
-		| _ -> Printf.printf "linearize_signature: should be TFun\n"; assert false )
-		
-	let signature_to_tp_info in_t = 
+		| GC_F_constructor  cf
+		| GC_F_method       cf -> ()
+		| GC_F_closure      _  -> ()
 
-		let rec split_level (acc,nxt) t = (match t with 
-			| TFun  (xs,rt) -> (* ref loop [ rt::xs ] *)
-				( TP_Ref :: acc , (rt :: (get_argument_types xs)) :: nxt)
-			| TLazy  _
-			| TType  _ 
-			| TAbstract _ -> split_level (acc,nxt) (follow t)
-			| TInst (_,tps)
-			| TEnum (_,tps) ->  (*ref [tps] *)
-				( TP_Ref :: acc, tps :: nxt )
-			| TAnon a       ->  (*ref loop a.fields *) 
-				( TP_Ref :: acc, (get_xs_types (get_anon_fields a)) :: nxt ) )
-		in
-		let split_l xs = 
-			let acc,nxt = List.fold_left ( fun acc t -> split_level acc t ) ([],[]) xs in
-			acc, (List.flatten (List.rev nxt))
-		in
-		let rec loop acc xs = (match split_l xs with
-			| res,nxt ->  loop (res :: acc) nxt
-			| res,[]  ->  List.flatten (List.rev (res :: acc)))
-		in 
-		let res = (match in_t with 
-			| TFun  (xs,rt) -> loop [] (rt :: (get_argument_types xs))
-			| _ -> assert false )
-		in ()
-			
-	(*let build_tp_info_for_signature in_t = 
-		(* breadth-first desctructured types *)
-		
-			| TI*)
-		
+
 
 	(* for every callees type parameter, return the first search_result found or SR_none *)
 	let get_tp_pos_info_from_callee in_t tps =
@@ -4074,440 +4009,33 @@ module GC = struct
 	(*type scope =
 		| FScope of int * (int,tvar) PMap.t * scope list
 		| LScope of int * (int,tvar) PMap.t * scope list*)
-	
+
 	module PSet = Set.Make(
 		struct
 			let compare = Pervasives.compare
 			type t = int
 		end )
-	module TSet = Set.Make(
-		struct
-			let compare = Pervasives.compare
-			type t = Type.path
-		end )
 
-	(* we want to collect data about scopes: 
-	 * 
-     * We are interested in 
-            - type parameter runtime information
-              type parameters 
-            - captured vars  
-              captured 
-            - stack map
-              stack map collects all stack references that are not captured vars regardless of branches and loops
-
-
-    These are somewhat related concerns, since they all require knowledge about nested scopes.
-    
-
-        __init__
-        statics
-            static var
-            static function[FunctionTPs]
-                closure1[FunctionTPs,Closure1TPs]
-                    closure2[FunctionTPs,Closure1TPs,Closure2TPs]
-            instance[ClassTPs]
-                var[ClassTPs]
-                function new[ClassTPs,FunctionTPs]
-                function[ClassTPs,FunctionTPs]
-                    closure1[ClassTPs,FunctionTPs,Closure1TPs]
-                        closure2[ClassTPs,FunctionTPs,Closure1TPs,Closure2TPs]
-	  
-    we need to know all ClassTPs, FunctionTPs and ClosureTPs
-      
-    function
-         branch
-         branch
-            closure
-         branch
-         loop
-           closure
-     *
-	 * *)
-
-	module Scope = struct
-
-        type scope_pos = int list
-
-		type block_kind = 
-			| B_root 
-			| B_branch
-			| B_loop
-		
-		type scope_kind = 
-			| SK_closure
-			| SK_method
-			| SK_function 
-	
-        type var_kind = 
-            | VK_default
-            | VK_captured
-            | VK_stackmap 
-
-        type var_event_kind = 
-			| VE_assign
-            | VE_store_local of int (* id of tvar we store to, if any *)
-            | VE_store_instance 
-            | VE_store_static 
-            | VE_call
-            | VE_return
-            | VE_default
-
-		type var_event = 
-			| V_decl
-			| V_use of var_event_kind 
-
-        type scope_upwards = {
-            ding : int;
-        }
-
-		type scope_t = {
-            (* known on initialization*)
-            s_id        : int;        (* integer id - unique within a given method/function including all closures defined within *)
-            s_fid       : int;
-            s_pid       : int option; (* parent scope id *)
-
-			s_skind     : scope_kind; (* closure|method|function*)
-			s_bkind	    : block_kind; (* root|branch|loop*)
-            s_args      : tvar list;  (* function args or for-loop var *)
-            (* here we collect data while we traverse the AST depth- and side-wards *)
-            s_events    : (tvar * var_event * scope_pos) list;
-            s_scopes    : scope_t list; 
-            (* here we add data when we leave nodes towards their parents *)
-            s_upwards   : scope_upwards option;
-		}
-
-        type acc_t = {
-            s_cur_sid : int;
-            s_cur_fid : int;
-            s_pos     : scope_pos;
-            s_scope   : scope_t;
-        }
-    
-        (* public API *)
-        (* initializers *)
-
-        let _scope_init sk bk s_id s_fid s_pid args = {
-            s_id;
-            s_fid;
-            s_pid;
-            s_skind   = sk;
-            s_bkind   = bk;
-            s_args    = args;
-
-            s_events  = [];
-            s_scopes  = [];
-            s_upwards = None;
-        }
-        
-        let acc_init s = {
-            s_cur_fid  = 0;
-            s_cur_sid  = 0;
-            s_pos      = [];
-            s_scope    = s;
-        }
-
-        let exit_scope outer acc = 
-            { acc with s_scope = { outer with s_scopes = acc.s_scope :: outer.s_scopes }}
-
-        let scope_init acc sk bk args = 
-            let is_root = (match bk with | B_root -> true | _ -> false ) in 
-            let acc = { acc with
-                s_cur_sid = acc.s_cur_sid + 1;
-                s_cur_fid = if is_root then acc.s_cur_fid + 1 else acc.s_cur_fid;
-            } in 
-            let s = _scope_init sk bk acc.s_cur_sid acc.s_cur_fid (Some acc.s_scope.s_id) args in 
-            let outer = acc.s_scope in 
-            { acc with s_scope = s },(exit_scope outer)
-        
-
-
-        let s_with acc s = { acc with s_scope = s }
-
-        
-		(* public API first pass *)
-		
-        let var_event acc v ev = let s = acc.s_scope in s_with acc 
-            { s with s_events = (v,ev,acc.s_pos) :: s.s_events }
-	
-        let enter_block acc  = { acc with s_pos = 0 :: acc.s_pos } 
-
-		let block_step  acc  = { acc with s_pos = (match acc.s_pos with 
-                                 | cur :: tl -> cur+1 :: tl 
-                                 | _         -> acc.s_pos) }
-
-        let exit_block acc   = { acc with s_pos = match acc.s_pos with _ :: tail -> tail | _ -> acc.s_pos }   
-
-		let enter_branch acc = (scope_init acc acc.s_scope.s_skind B_branch [])
-        
-        let enter_loop acc args = (scope_init acc acc.s_scope.s_skind B_loop args) 
-
-        let enter_closure acc args = (scope_init acc SK_closure B_root args)
-        
-        let enter_fold_exit_branch acc loop e =
-            let acc,exit = enter_branch acc in
-            let e,acc    = loop acc e in 
-            e,(exit acc)
-        
-        let enter_fold_exit_loop acc loop e args = 
-            let acc,exit = enter_loop acc args in
-            let e,acc    = loop acc e in 
-            e,(exit acc)
-        
-
-
-
-        (*
-
-		let exit_branch acc outer = exit_scope acc outer
-
-		let enter_loop acc args = let s = acc.s_scope in s_with acc 
-            (scope_init acc (Some s) s.s_skind B_loop args) 
-
-		let exit_loop acc outer = exit_scope acc outer
-
-		let enter_closure acc args = let s = acc.s_scope in s_with acc 
-            (scope_init acc (Some s) SK_closure B_root args)
-
-		let exit_closure acc outer = exit_scope acc outer
-
-        *)
-		(* post processing *)
-
-    
-
-
-    let sc_add_var acc v assigned = 
-        let acc = var_event acc v V_decl in 
-        if assigned then 
-            var_event acc v (V_use VE_assign)
-        else
-            acc
-                
-    
-    let sc_var_used acc v = var_event acc v (V_use VE_default)
-
-    let sc_var_assign acc v = var_event acc v (V_use VE_assign)
-
-	let scopes acc fctx te =
-		let rec loop acc te = match te.eexpr with
-		| TVar(v, Some ({eexpr = TFunction tf} as e)) -> 
-			let acc = sc_add_var acc v true in (* first add the var, still in outer scope *)
-			let tf,acc = (enter_function_scope_loop_exit acc tf loop (v_get_tp_types v)) in 
-			{ te with eexpr = TVar(v,Some {e with eexpr = TFunction  tf}) },acc
-			
-		| TBinop(OpAssign,({eexpr = TLocal v} as e1),({eexpr = TFunction tf} as e2)) -> (*we're entering a closure type parameters?*)
-			(*Printf.printf " VAR :: %s id: %d in TLocal\n" (v.v_name) v.v_id;*)
-			let acc = sc_var_used acc v in (* first mark the var used, still in outer scope *)
-			let tf,acc = (enter_function_scope_loop_exit acc tf loop (v_get_tp_types v)) in 
-			{ te with eexpr = TBinop(OpAssign,e1, {e2 with eexpr = TFunction tf}) },acc
-			
-		| TFunction tf -> (* we're entering a closure that doesn't have type parameters *)
-			let tf,acc = (enter_function_scope_loop_exit acc tf loop []) in 
-			{ te with eexpr = TFunction tf },acc
-			
-		| TVar (v,eo) ->
-			(*Printf.printf " VAR :: %s id: %d expr: %s in TVar\n" (v.v_name) v.v_id (match eo with Some e -> (s_exp e) | _ -> "(None)" );*)
-			let eo,acc = Type.foldmap_eo loop acc eo in (*Printf.printf "svars[%s]" (s_vars s.s_vars);*)
-			{ te with eexpr = TVar(v,eo)},
-			(sc_add_var acc v (match eo with Some _ -> true | _ -> false ))
-			
-		| TBinop(OpAssign,({eexpr=TLocal v} as e1),e2) ->
-			(*let acc = (sc_var_used acc v) in *)
-			(*Printf.printf "OpAssign :: %s id: %d expr: %s \n" (v.v_name) v.v_id (s_exp e2);*)
-			let acc = sc_var_assign acc v in 
-			let e2,acc = loop acc e2 in 
-			{ te with eexpr = TBinop(OpAssign,e1,e2) },acc
-			
-		| TLocal v -> 
-			(*Printf.printf " VAR :: %s id: %d in TLocal\n" (v.v_name) v.v_id;*)
-			te,(sc_var_used acc v)
-			
-		| TWhile (e1,e2,x) ->
-			let inner = sc_upd_vars acc (init_scope (loop_scope_kind acc.sc_vars)) in 
-			let e1,inner = loop inner e1 in 
-			let e2,inner = loop inner e2 in 
-			{ te with eexpr = TWhile(e1,e2,x)},
-			(*{ sc_tps = inner.sc_tps; sc_vars = (scope_merge acc.sc_vars inner.sc_vars) }*)
-			{ inner with sc_vars = (scope_merge acc.sc_vars inner.sc_vars) }
-			
-		| TFor (v,e1,e2)   ->
-			let e1,acc   = loop acc e1 in   (* e1 isn't evaluated inside the loop .. *)
-			let inner = sc_upd_vars acc (init_scope (loop_scope_kind acc.sc_vars)) in 
-			let e2,inner = loop inner e2 in (* .. and e2 is *)
-			{ te with eexpr = TFor(v,e1,e2)},
-			{ inner with sc_vars = (scope_merge acc.sc_vars inner.sc_vars) }
-			(*{ sc_tps = inner.sc_tps; sc_vars = (scope_merge acc.sc_vars inner.sc_vars) }*)
-
-        | TIf(ec,e1,eo) ->
-            let ec,acc = loop acc ec in 
-            let e1,acc = enter_fold_exit_branch acc loop e1 in
-            let eo,acc = (match eo with 
-                | Some(e) -> 
-                    let e,acc = enter_fold_exit_branch acc loop e in 
-                    (Some e),acc
-                | _ -> None,acc) in 
-            { te with eexpr = TIf(ec,e1,eo)},acc
-        | TSwitch(e1,cases,def) ->
-            let e1,acc = loop acc e1 in
-		    let acc,cases = List.fold_left (fun (acc,cases) (el,e2) ->
-                let acc,exit = enter_branch acc in 
-			    let el,acc = foldmap_list loop acc el in
-			    let e2,acc = loop acc e2 in
-                let acc = (exit acc) in
-			    acc,((el,e2) :: cases)
-		    ) (acc,[]) cases in
-            let cases = List.rev cases in          
-            let def,acc = (match def with 
-                | Some(e) -> let e,acc = enter_fold_exit_branch acc loop e in (Some e),acc
-                | _ -> None,acc) in 
-		    { te with eexpr = TSwitch (e1, cases, def) },acc
-
-		| TNew(c,tps,el) ->
-			let el,acc = Type.foldmap_list loop acc el in 
-			{ te with eexpr = TNew(c,tps,el) },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps tps }
-			
-		| TObjectDecl el ->
-			let el,acc = Type.foldmap_pairs loop acc el in 
-			let tps = List.map (fun (_,e) ->  e.etype) el in 
-			{ te with eexpr = TObjectDecl el },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps tps }
-			
-		| TArrayDecl el -> 
-			let tps = (match te.etype with | TInst(_,tps) -> tps | _ -> assert false) in 
-			let el,acc = Type.foldmap_list loop acc el in 
-			{ te with eexpr = TArrayDecl el },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps tps }
-			
-		| TCall({eexpr=TField(eenum,FEnum(et,ef))} as efield, el) ->
-			let tps = (match te.etype with | TEnum (_,tps) -> tps | _ -> assert false) in 
-			let el,acc = Type.foldmap_list loop acc el in 
-			{ te with eexpr = TCall( efield, el) },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps tps }
-			
-		| TCall(({eexpr=TField(_,(FStatic(({cl_extern = false} as c),cf) | FInstance(c,_,cf)))} as efield),el) ->
-			let _ = c in
-			let tps = infer_callsite_tps (mk_caller_args el) te.etype cf in 
-			let el,acc = Type.foldmap_list loop acc el in 
-			{ te with eexpr = TCall( efield, el) },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps tps }
-			
-		| TCall(e1,el) when ClosureHandler.is_closure_expr e1 ->
-			let e1,acc = loop acc e1 in (* this doesn't do anything I suppose *)
-			let el,acc = Type.foldmap_list loop acc el in 
-			
-			{ te with eexpr = TCall( e1, el) },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps [] }
-		
-		| TCall(({eexpr=TField(_,(FStatic(({cl_extern = true} as c),cf) ))} as efield),el) ->
-			Type.foldmap_expr loop acc te
-			
-		| TCall(e1,el) -> 
-			Printf.printf "and which call is this ?? %s \n." (s_exp te);
-			Type.foldmap_expr loop acc te
-		
-		| TBinop(OpAssign,({eexpr=TField(efield,(FInstance(_,_,cf)|FStatic(_,cf)|FAnon(cf)))} as te1),te2) ->
-			let e1,acc = loop acc te1 in (* this doesn't do anything I suppose *)
-			let e2,acc = loop acc te2 in 
-			{ te with eexpr = TBinop(OpAssign,e1,e2) },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps [e2.etype] }
-		
-		| TBlock el ->
-			let block_pos = acc.sc_pos in 
-			let rec loop2 pos acc el acc2 = (match el with
-				| [] -> (List.rev acc2),acc
-				| e1 :: el ->
-					let acc = { acc with sc_pos = pos :: block_pos } in 
-					(*Printf.printf "block_pos: %s\n" (String.concat "::" (List.map string_of_int (List.rev acc.sc_pos)));*)
-					let e1,acc = loop acc e1 in
-					loop2 (pos+1) acc el (e1 :: acc2))
-			in 
-			let el,acc = loop2 0 acc el [] in 
-			{ te with eexpr = TBlock el },acc
-			(*let acc,el = List.fold_left ( fun (acc,el) e -> 
-				let e,acc = loop acc e in acc,(e::el)) (acc,[]) el in
-			{ te with eexpr = TBlock (List.rev el) },acc*)
-		| _ -> Type.foldmap_expr loop acc te
-		in
-		loop acc te
-
-	let tset_add_tps tset tps = List.fold_left (fun tset t -> (match Type.follow t with 
-		| TInst({cl_kind=KTypeParameter _;cl_path=path},_) -> TSet.add path tset
-		| _ -> tset )) tset tps
-			
-	type scope_pos = int list 
-	
-	let sc_pos_cmp a b = Pervasives.compare (List.rev a) (List.rev b)
-	
 	type scope_kind =
 		| SK_root
-		| SK_loop of var_scope
-		| SK_func of var_scope
-		| SK_func_loop of var_scope
+		| SK_loop of scope
+		| SK_func of scope
+		| SK_func_loop of scope
 
-	and var_scope = {
-		s_id        : int;
-		s_kind      : scope_kind;
-		s_vars      : (int,(tvar * scope_pos)) PMap.t;
-		s_used      : PSet.t;
-		s_rest      : PSet.t;
-		s_assigned_first : (int,scope_pos) PMap.t;
-		s_used_last : (int,scope_pos) PMap.t;
-		s_scopes    : var_scope list;
+	and scope = {
+		s_kind   : scope_kind;
+		s_vars   : (int,tvar) PMap.t;
+		s_used   : PSet.t;
+		s_rest   : PSet.t;
+		s_scopes : scope list;
 	}
-	
-	type first_last = 
-		| First of int * scope_pos
-		| Last of int * scope_pos
-	
-	let compare_by_pos a b = match a,b with
-		(First (_,a) | Last(_,a)),(First (_,b) | Last(_,b)) -> Pervasives.compare a b
-	
-	let s_name_or_id m v = try ( (fst(PMap.find v m)).v_name ^":"^ string_of_int v)with Not_found -> (string_of_int v)
-	let s_vars m = String.concat "::" (List.map (fun (v,_) -> (v.v_name ^":"^ string_of_int v.v_id)) (pmap_to_list m))
+
+	let s_name_or_id m v = try ((PMap.find v m).v_name ^":"^ string_of_int v)with Not_found -> (string_of_int v)
+	let s_vars m = String.concat "::" (List.map (fun v -> (v.v_name ^":"^ string_of_int v.v_id)) (pmap_to_list m))
 	let s_used s = String.concat "::" (PSet.fold (fun v acc -> (s_name_or_id s.s_vars v) :: acc) s.s_used [])
 	let s_rest s = String.concat "::" (PSet.fold (fun v acc -> (s_name_or_id s.s_vars v) :: acc) s.s_rest [])
 
-	let s_int_list l = (String.concat "::" (List.map string_of_int l))
-	
-	let s_id_pos id pos = 
-		(string_of_int id) ^ " " ^ (s_int_list pos)
-	
-	let s_firstlast = function 
-		| First(id,pos) -> "First " ^ (s_id_pos id pos) 
-		| Last(id,pos) -> "Last " ^ (s_id_pos id pos) 
-		
-	let s_firstlast_l l = 
-		
-		let _ = List.fold_left ( fun acc x -> 
-			let acc = (match x with 
-				| First (id,_) -> PSet.add id acc
-				| Last  (id,_) -> if PSet.mem id acc then PSet.remove id acc else acc)
-			in 
-			let cur = PSet.fold (fun id acc -> id ::acc ) acc [] in 
-			Printf.printf "%s [%s]\n" (s_firstlast x) (s_int_list cur); 
-			acc
-		) PSet.empty l
-		in ()
-	
-    (*let scope_all_vars s = 
-		let rec f s = List.flatten ( List.map ( fun s -> f s ) s.s_scopes) *)
-		
-	let s_scope_lifetimes tctx s = 
-		let l = PMap.foldi (fun k b l -> (Last (k, b)) :: l ) s.s_used_last [] in 
-		let l = PMap.foldi (fun k b l -> (First(k, b)) :: l ) s.s_assigned_first l in 
-		
-		let l = List.sort compare_by_pos l in 
-		s_firstlast_l l;
-		()
-	
-	let s_scope_data s rest = 
-		Printf.sprintf " used:[%s] rest:[%s] vars:[%s] [%s]" (s_used s) (s_rest s) (s_vars s.s_vars) rest
-		
-	let rec s_scope ind s = 
-		
-		(match s.s_kind with
+	let rec s_scope ind s = match s.s_kind with
 		| SK_root ->
 			Printf.sprintf "\nroot: used:[%s] rest:[%s] vars:[%s] [%s]" (s_used s) (s_rest s) (s_vars s.s_vars) (s_concat s.s_scopes ind)
 		| SK_loop _ ->
@@ -4516,9 +4044,7 @@ module GC = struct
 			Printf.sprintf "\n%*sfunc: used:[%s] rest:[%s] vars:[%s] [%s]" (ind*3) "" (s_used s) (s_rest s) (s_vars s.s_vars) (s_concat s.s_scopes ind)
 		| SK_func_loop _ ->
 			Printf.sprintf "\n%*sfunc_loop: used:[%s] rest:[%s] vars:[%s] [%s]" (ind*3) "" (s_used s) (s_rest s) (s_vars s.s_vars) (s_concat s.s_scopes ind)
-		)
-		
-		
+
 	and s_concat sl indent = String.concat "" (List.map (s_scope (indent+1)) sl)
 
 	type scope_acc = {
@@ -4526,19 +4052,16 @@ module GC = struct
 	}
 
 	let init_scope k = {
-        s_id     = 0;
 		s_kind   = k;
 		s_vars   = PMap.empty;
 		s_used   = PSet.empty;
 		s_rest   = PSet.empty;
-		s_assigned_first = PMap.empty;
-		s_used_last = PMap.empty;
 		s_scopes = [];
 	}
 
-	let init_function_scope k tf pos =
+	let init_function_scope k tf =
 		let scope = init_scope k in
-		{ scope with s_vars = List.fold_left (fun m (v,_) -> PMap.add v.v_id (v,pos) m) PMap.empty tf.tf_args }
+		{ scope with s_vars = List.fold_left (fun m (v,_) -> PMap.add v.v_id v m) PMap.empty tf.tf_args }
 
 	let find_vid_in_current_function s vid =
 		let rec loop s = match s.s_kind with
@@ -4549,14 +4072,6 @@ module GC = struct
 		| _ -> true (* any remaining vars must be in some loop or root *)
 		in loop s
 
-	let merge_pmaps prio m = 
-		PMap.foldi ( fun k b m -> PMap.add k b m ) prio m
-		
-	(* we want to pass first/last used bindings on, but only if the vars haven't been declared in inner *)
-	let merge_pmaps_check outer inner inner_vars = 
-		PMap.foldi ( fun k b m -> 
-			if not (PMap.mem k inner_vars) then PMap.add k b m else m) inner outer
-		
 	let scope_merge outer inner =
 		let used,rest = PSet.fold (fun vid (used,rest) ->
 			if PMap.mem vid outer.s_vars then
@@ -4564,330 +4079,47 @@ module GC = struct
 			else
 				used,PSet.add vid rest
 		) inner.s_rest (outer.s_used,outer.s_rest)  in
-		(*last_used - inner (== later) has precedence *)
-		let used_last = PMap.foldi ( fun k b outer -> PMap.add k b outer ) inner.s_used_last outer.s_used_last in
-		let assigned_first = PMap.foldi ( fun k b outer -> PMap.add k b outer ) inner.s_assigned_first outer.s_assigned_first in
-		
 		let inner = { inner with s_scopes = (List.rev inner.s_scopes) } in
-		{ outer with 
-			s_used = used; 
-			s_rest = rest; 
-			s_used_last = used_last;
-			s_assigned_first = assigned_first;
-			s_scopes = inner :: outer.s_scopes }
+		{ outer with s_used = used; s_rest = rest; s_scopes = inner :: outer.s_scopes }
 
-	
-			
 	let loop_scope_kind s = match s.s_kind with
 		| SK_func p
 		| SK_func_loop p -> SK_func_loop s
 		| SK_loop p      -> SK_loop s
 		| SK_root        -> SK_loop s
 
-	(* TP accumulator *)
-	
-	type tp_scope = {
-		tps_kind     : tp_scope_kind; 
-		tps_tps      : TSet.t; (*the TPs this scope is parameterized with *)
-		tps_required : TSet.t; (*all the TPs used in this scope (can be TPs from parent scopes) *)
-		tps_cs       : tp_scope list;
-	}
-	
-	and tp_scope_kind =
-		| TS_none
-		| TS_class
-		| TS_static
-		| TS_method of tp_scope
-		| TS_closure of tp_scope
-
-	type scopes_acc = {
-		sc_tps  : tp_scope;
-		sc_vars : var_scope;
-		sc_pos  : scope_pos;
-	}
-		
-	let tp_add_tps tp_scope tps = 
-		{ tp_scope with tps_required = tset_add_tps tp_scope.tps_required tps }
-		
-	let init_tp_scope c fctx = (match fctx with
-		(* no type parameters *)
-		| SC_init 
-		| SC_static_var _ -> 
-			{ tps_kind=TS_none; tps_tps = TSet.empty; tps_required = TSet.empty; tps_cs = [] }
-		(* only class TPs *)
-		| SC_instance_var cf -> 
-			let tset = tset_add_tps TSet.empty (types_of_tparams c.cl_params) in 
-			{ tps_kind=TS_class; tps_tps = tset; tps_required = tset; tps_cs = [] }
-		(* only function TPs, if any *)
-		| SC_static_func cf -> 
-			let tset = tset_add_tps TSet.empty (types_of_tparams cf.cf_params) in 
-			{ tps_kind=TS_static; tps_tps = tset; tps_required = tset; tps_cs = [] }
-		(* both class and method TPs *)
-		| SC_constructor cf 
-		| SC_method cf ->
-			let tset = tset_add_tps TSet.empty (types_of_tparams c.cl_params) in 
-			let tps_class =  { tps_kind=TS_class; tps_tps = tset; tps_required = tset; tps_cs = [] } in 
-			let tset = tset_add_tps TSet.empty (types_of_tparams cf.cf_params) in 
-			{ tps_kind=TS_method tps_class; tps_tps = tset; tps_required = tset; tps_cs = [] }
-		(* doesn't ever occur here *)
-		| SC_closure _ -> assert false 
-	)
-	
-	let enter_tp_scope outer tps = 
-		let tset = tset_add_tps TSet.empty tps in 
-		{ tps_kind=TS_closure outer; tps_tps = tset; tps_required = tset; tps_cs = [] }
-		
-	let exit_tp_scope outer inner = 
-		{ outer with tps_cs = inner :: outer.tps_cs }
-	
-	(* combined accumulator *)
-
-	let sc_upd_vars acc vars = { acc with sc_vars = vars }
-	
-	let scope_add_var s v pos = 
-		let pos = List.rev pos in { s with 
-		s_vars = PMap.add v.v_id (v,pos) s.s_vars;
-		s_used_last = PMap.add v.v_id pos s.s_used_last;
-	}
-	
-	let scope_asgn_first s v pos = 
-		if not (PMap.mem v.v_id s.s_assigned_first) then
-		let pos = List.rev pos in 
-		{ s with 
-			s_assigned_first = PMap.add v.v_id pos s.s_assigned_first;
-			s_used_last = PMap.add v.v_id pos s.s_used_last;
-		} 
-		else s
-	
-	let sc_add_var (acc : scopes_acc) v asgn = 
-		let s = scope_add_var acc.sc_vars v acc.sc_pos in 
-		let s = if asgn then scope_asgn_first s v acc.sc_pos else s in  
-		{ acc with sc_vars = s } 
-		
-		(*
-		let s = { s with 
-			s_vars = PMap.add v.v_id (v,pos) s.s_vars;
-			s_assigned_first = if asgn then PMap.add v.v_id pos s.s_assigned_first else s.s_assigned_first;
-		} in 
-		{ acc with sc_vars = s }*)
-	
-	let sc_var_assign acc v = 
-		{ acc with sc_vars = scope_asgn_first acc.sc_vars v acc.sc_pos }
-	
-	let sc_var_used acc v = 
-		let s = acc.sc_vars in 
-		let s = { s with s_used_last = PMap.add v.v_id (List.rev acc.sc_pos) s.s_used_last } in 
-		let s = (match s.s_kind with
+	let scopes te =
+		let rec loop s te = match te.eexpr with
+		| TVar (v,eo) ->
+			let s = Type.fold_expr_eo loop s eo in
+			(*Printf.printf "svars[%s]" (s_vars s.s_vars);*)
+			{ s with s_vars = PMap.add v.v_id v s.s_vars  }
+		| TLocal v -> (match s.s_kind with
 			| SK_func _
 			| SK_func_loop _ ->
-				begin if not (find_vid_in_current_function s v.v_id) then
+				(if not (find_vid_in_current_function s v.v_id) then
 					{ s with s_rest = PSet.add v.v_id s.s_rest  }
-				else s end
-			| _ -> s) in 
-		{ acc with sc_vars = s }
-		
-	
-	let v_get_tp_types v = (match v.v_extra with
-		| Some (tps,_) -> types_of_tparams tps
-		| _ -> [])
-	
-	let get_types_el el = List.map (fun e -> e.etype ) el 
-	
-	let enter_function_scope_loop_exit acc tf loop tps = 
-		let inner = { 
-			sc_tps  = enter_tp_scope acc.sc_tps tps; 
-			sc_vars = (init_function_scope (SK_func acc.sc_vars) tf acc.sc_pos);
-			sc_pos  = acc.sc_pos;
-		} in let tf_expr,inner = loop inner tf.tf_expr in 
-		{tf with tf_expr = tf_expr},
-		{
-			sc_tps  = exit_tp_scope acc.sc_tps inner.sc_tps;
-			sc_vars = scope_merge acc.sc_vars inner.sc_vars;
-			sc_pos  = acc.sc_pos;
-		}
-	
-	let fun_types = function | TFun(args,ret) -> ret :: (List.map (fun (_,_,t) -> t) args) | _ -> assert false
-	
-	let mk_caller_args el = List.map (fun e -> "_",false,e.etype ) el
-	
-	let s_type t = (Type.s_type (print_context())) t
-	
-	let s_unify_err err = Typecore.unify_error_msg (print_context()) err
-	
-	let fun_types = function | TFun(args,ret) -> ret :: (List.map (fun (_,_,t) -> t) args) | _ -> assert false
-	
-	let s_exp e = (s_expr_pretty "" (Type.s_type (print_context())) e)
-	
-	let infer_callsite_tps caller_args caller_ret cf = (match cf.cf_params with
-		| (_ :: _) as params ->
-			let monos = List.map (fun _ -> Type.mk_mono()) params in
-			let caller_t = TFun(caller_args,caller_ret) in 
-			let callee_t = Type.apply_params params monos cf.cf_type in 
-			(*let caller_t = Type.apply_params params monos caller_t in *)
-			let caller_l = fun_types caller_t in 
-			let callee_l = fun_types callee_t in 
-			(*(try
-				Type.unify caller_t callee_t
-			with | Unify_error el -> 
-				Printf.printf "unification failed\n %s \n" (String.concat "\n" (List.map (s_unify_err) el));
-			assert false);*)
-			(try
-				List.iter2 (fun a o ->
-					let o = Type.follow o in
-					let a = Type.follow a in
-					Type.unify a o
-					(* type_eq EqStrict a o *)
-				) caller_l callee_l
-				(* unify applied original *)
-			with | Unify_error el -> 
-				Printf.printf "unification failed\n %s \n" (String.concat "\n" (List.map (s_unify_err) el));
-		        assert false);
-			monos
-		| _ -> []
-	)
-	
-	let scopes acc fctx te =
-		let rec loop acc te = match te.eexpr with
-		| TVar(v, Some ({eexpr = TFunction tf} as e)) -> 
-			let acc = sc_add_var acc v true in (* first add the var, still in outer scope *)
-			let tf,acc = (enter_function_scope_loop_exit acc tf loop (v_get_tp_types v)) in 
-			{ te with eexpr = TVar(v,Some {e with eexpr = TFunction  tf}) },acc
-			
-		| TBinop(OpAssign,({eexpr = TLocal v} as e1),({eexpr = TFunction tf} as e2)) -> (*we're entering a closure that possibly has type parameters *)
-			(*Printf.printf " VAR :: %s id: %d in TLocal\n" (v.v_name) v.v_id;*)
-			let acc = sc_var_used acc v in (* first mark the var used, still in outer scope *)
-			let tf,acc = (enter_function_scope_loop_exit acc tf loop (v_get_tp_types v)) in 
-			{ te with eexpr = TBinop(OpAssign,e1, {e2 with eexpr = TFunction tf}) },acc
-			
-		| TFunction tf -> (* we're entering a closure that doesn't have type parameters *)
-			let tf,acc = (enter_function_scope_loop_exit acc tf loop []) in 
-			{ te with eexpr = TFunction tf },acc
-			
-		| TVar (v,eo) ->
-			(*Printf.printf " VAR :: %s id: %d expr: %s in TVar\n" (v.v_name) v.v_id (match eo with Some e -> (s_exp e) | _ -> "(None)" );*)
-			let eo,acc = Type.foldmap_eo loop acc eo in (*Printf.printf "svars[%s]" (s_vars s.s_vars);*)
-			{ te with eexpr = TVar(v,eo)},
-			(sc_add_var acc v (match eo with Some _ -> true | _ -> false ))
-			
-		| TBinop(OpAssign,({eexpr=TLocal v} as e1),e2) ->
-			(*let acc = (sc_var_used acc v) in *)
-			(*Printf.printf "OpAssign :: %s id: %d expr: %s \n" (v.v_name) v.v_id (s_exp e2);*)
-			let acc = sc_var_assign acc v in 
-			let e2,acc = loop acc e2 in 
-			{ te with eexpr = TBinop(OpAssign,e1,e2) },acc
-			
-		| TLocal v -> 
-			(*Printf.printf " VAR :: %s id: %d in TLocal\n" (v.v_name) v.v_id;*)
-			te,(sc_var_used acc v)
-			
-		| TWhile (e1,e2,x) ->
-			let inner = sc_upd_vars acc (init_scope (loop_scope_kind acc.sc_vars)) in 
-			let e1,inner = loop inner e1 in 
-			let e2,inner = loop inner e2 in 
-			{ te with eexpr = TWhile(e1,e2,x)},
-			(*{ sc_tps = inner.sc_tps; sc_vars = (scope_merge acc.sc_vars inner.sc_vars) }*)
-			{ inner with sc_vars = (scope_merge acc.sc_vars inner.sc_vars) }
-			
+				else s)
+			| _ -> s)
+		| TWhile (e1,e2,_) ->
+			let inner = loop (loop (init_scope (loop_scope_kind s)) e1) e2 in
+			if (s == inner) then assert false else
+			scope_merge s inner
 		| TFor (v,e1,e2)   ->
-			let e1,acc   = loop acc e1 in   (* e1 isn't evaluated inside the loop .. *)
-			let inner = sc_upd_vars acc (init_scope (loop_scope_kind acc.sc_vars)) in 
-			let e2,inner = loop inner e2 in (* .. and e2 is *)
-			{ te with eexpr = TFor(v,e1,e2)},
-			{ inner with sc_vars = (scope_merge acc.sc_vars inner.sc_vars) }
-			(*{ sc_tps = inner.sc_tps; sc_vars = (scope_merge acc.sc_vars inner.sc_vars) }*)
-
-		| TNew(c,tps,el) ->
-			let el,acc = Type.foldmap_list loop acc el in 
-			{ te with eexpr = TNew(c,tps,el) },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps tps }
-			
-		| TObjectDecl el ->
-			let el,acc = Type.foldmap_pairs loop acc el in 
-			let tps = List.map (fun (_,e) ->  e.etype) el in 
-			{ te with eexpr = TObjectDecl el },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps tps }
-			
-		| TArrayDecl el -> 
-			let tps = (match te.etype with | TInst(_,tps) -> tps | _ -> assert false) in 
-			let el,acc = Type.foldmap_list loop acc el in 
-			{ te with eexpr = TArrayDecl el },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps tps }
-			
-		| TCall({eexpr=TField(eenum,FEnum(et,ef))} as efield, el) ->
-			let tps = (match te.etype with | TEnum (_,tps) -> tps | _ -> assert false) in 
-			let el,acc = Type.foldmap_list loop acc el in 
-			{ te with eexpr = TCall( efield, el) },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps tps }
-			
-		| TCall(({eexpr=TField(_,(FStatic(({cl_extern = false} as c),cf) | FInstance(c,_,cf)))} as efield),el) ->
-			let _ = c in
-			let tps = infer_callsite_tps (mk_caller_args el) te.etype cf in 
-			let el,acc = Type.foldmap_list loop acc el in 
-			{ te with eexpr = TCall( efield, el) },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps tps }
-			
-		| TCall(e1,el) when ClosureHandler.is_closure_expr e1 ->
-			let e1,acc = loop acc e1 in (* this doesn't do anything I suppose *)
-			let el,acc = Type.foldmap_list loop acc el in 
-			
-			{ te with eexpr = TCall( e1, el) },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps [] }
-		
-		| TCall(({eexpr=TField(_,(FStatic(({cl_extern = true} as c),cf) ))} as efield),el) ->
-			Type.foldmap_expr loop acc te
-			
-		| TCall(e1,el) -> 
-			Printf.printf "and which call is this ?? %s \n." (s_exp te);
-			Type.foldmap_expr loop acc te
-		
-		| TBinop(OpAssign,({eexpr=TField(efield,(FInstance(_,_,cf)|FStatic(_,cf)|FAnon(cf)))} as te1),te2) ->
-			let e1,acc = loop acc te1 in (* this doesn't do anything I suppose *)
-			let e2,acc = loop acc te2 in 
-			{ te with eexpr = TBinop(OpAssign,e1,e2) },
-			{ acc with sc_tps = tp_add_tps acc.sc_tps [e2.etype] }
-		
-		| TBlock el ->
-			let block_pos = acc.sc_pos in 
-			let rec loop2 pos acc el acc2 = (match el with
-				| [] -> (List.rev acc2),acc
-				| e1 :: el ->
-					let acc = { acc with sc_pos = pos :: block_pos } in 
-					(*Printf.printf "block_pos: %s\n" (String.concat "::" (List.map string_of_int (List.rev acc.sc_pos)));*)
-					let e1,acc = loop acc e1 in
-					loop2 (pos+1) acc el (e1 :: acc2))
-			in 
-			let el,acc = loop2 0 acc el [] in 
-			{ te with eexpr = TBlock el },acc
-			(*let acc,el = List.fold_left ( fun (acc,el) e -> 
-				let e,acc = loop acc e in acc,(e::el)) (acc,[]) el in
-			{ te with eexpr = TBlock (List.rev el) },acc*)
-		| _ -> Type.foldmap_expr loop acc te
+			let inner = loop (loop (init_scope (loop_scope_kind s)) e1) e2 in
+			if (s == inner) then assert false else
+			scope_merge s inner
+		| TFunction tf ->
+			let inner = loop (init_function_scope (SK_func s) tf) tf.tf_expr in
+			if (s == inner) then assert false else
+			scope_merge s inner
+		| _ -> Type.fold_expr loop s te
 		in
-		let c,tctx = acc in 
-		let sc_tps = init_tp_scope c fctx in 
-		let pos = [] in 
-		let acc,e = (match te.eexpr with
-			| TFunction tf -> 	{ sc_pos = pos; sc_tps = sc_tps; sc_vars = (init_function_scope SK_root tf pos) },tf.tf_expr
-			| _ ->  			{ sc_pos = pos; sc_tps = sc_tps; sc_vars = (init_scope SK_root) },te )
-		in 
-		let e,acc = loop acc te in
-		(match fctx with 
-			| SC_method cf -> Printf.printf "(_:%s).%s\n" (snd c.cl_path) cf.cf_name;
-			| SC_static_func cf -> Printf.printf "%s.%s\n" (snd c.cl_path) cf.cf_name;
-			| _ -> ()
-		);
-		Printf.printf "scope: %s\n" (s_scope 0 acc.sc_vars);
-		Printf.printf "lifetimes: \n"; 
-		(*Printf.printf "all: %s\n" (s_exp te);*)
-		s_scope_lifetimes tctx acc.sc_vars;
-		(c,tctx),e
-
-	
-	let run_scopes (tctx : gc_types_ctx) types = 
-		
-		let clss = fold_left_rev (fun acc t -> match t with TInst(c,_) -> c :: acc | _ -> acc ) [] types in 
-		let _ = List.map (fun c -> fold_fields (c,tctx) c scopes ) clss in 
-		()
+		let root_scope = (match te.eexpr with
+			| TFunction tf -> loop (init_function_scope SK_root tf) tf.tf_expr
+			| _ -> loop (init_scope SK_root) te)
+		in
+		Printf.printf "scope: %s\n." (s_scope 0 root_scope)
 
 
 	(**********************************************)
@@ -5224,12 +4456,8 @@ module GC = struct
 
 		(* expressions pass 1 *)
 		List.iter (handle_expressions expressions_pass_1) ptypes;
-		
-		run_scopes tctx types;
-		
+
 		List.iter (handle_expressions print_all_tps) ptypes;
-		
-		
 
 		(*List.iter (handle_expressions par_map_expr) ptypes;*)
 
