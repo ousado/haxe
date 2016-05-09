@@ -54,7 +54,7 @@ let get_general_module_type ctx mt p =
 			end
 		| _ -> error "Cannot use this type as a value" p
 	in
-	Typeload.load_instance ctx ({tname=loop mt;tpackage=[];tsub=None;tparams=[]},p) true
+	Typeload.load_instance ctx ({tname=loop mt;tpackage=[];tsub=None;tparams=[]},null_pos) true p
 
 module Constructor = struct
 	type t =
@@ -103,8 +103,11 @@ module Constructor = struct
 	open Typecore
 
 	let to_texpr ctx match_debug p con = match con with
-		| ConEnum(_,ef) ->
-			if match_debug then mk (TConst (TString ef.ef_name)) ctx.t.tstring p
+		| ConEnum(en,ef) ->
+			if Meta.has Meta.FakeEnum en.e_meta then begin
+				let e_mt = !type_module_type_ref ctx (TEnumDecl en) None p in
+ 				mk (TField(e_mt,FEnum(en,ef))) ef.ef_type p
+ 			end else if match_debug then mk (TConst (TString ef.ef_name)) ctx.t.tstring p
 			else mk (TConst (TInt (Int32.of_int ef.ef_index))) ctx.t.tint p
 		| ConConst ct -> Codegen.ExprBuilder.make_const_texpr ctx.com ct p
 		| ConArray i -> Codegen.ExprBuilder.make_int ctx.com i p
@@ -404,7 +407,7 @@ module Pattern = struct
 				PatExtractor(v,e1,pat)
 			| EDisplay(e,call) ->
 				let pat = loop e in
-				let _ = Typer.handle_display ctx e call (WithType t) p in
+				let _ = Typer.handle_display ctx e call (WithType t) in
 				pat
 			| _ ->
 				fail()
@@ -1075,6 +1078,7 @@ module TexprConverter = struct
 	type match_kind =
 		| SKValue
 		| SKEnum
+		| SKFakeEnum
 		| SKLength
 
 	exception Not_exhaustive
@@ -1095,6 +1099,7 @@ module TexprConverter = struct
 	let s_match_kind = function
 		| SKValue -> "value"
 		| SKEnum -> "enum"
+		| SKFakeEnum -> "fakeEnum"
 		| SKLength -> "length"
 
 	let unify_constructor ctx params t con =
@@ -1178,7 +1183,10 @@ module TexprConverter = struct
 				SKLength,Infinite
 			| TEnum(en,pl) ->
 				PMap.iter (fun _ ef -> add (ConEnum(en,ef))) en.e_constrs;
-				SKEnum,RunTimeFinite
+				if Meta.has Meta.FakeEnum en.e_meta then
+					SKFakeEnum,CompileTimeFinite
+				else
+					SKEnum,RunTimeFinite
 			| TAnon _ ->
 				SKValue,CompileTimeFinite
 			| TInst(_,_) ->
@@ -1188,7 +1196,7 @@ module TexprConverter = struct
 		in
 		let kind,finiteness = loop t in
 		let compatible_kind con = match con with
-			| ConEnum _ -> kind = SKEnum
+			| ConEnum _ -> kind = SKEnum || kind = SKFakeEnum
 			| ConArray _ -> kind = SKLength
 			| _ -> kind = SKValue
 		in
@@ -1225,7 +1233,7 @@ module TexprConverter = struct
 	let to_texpr ctx t_switch match_debug with_type dt =
 		let com = ctx.com in
 		let p = dt.dt_pos in
-		let c_type = match follow (Typeload.load_instance ctx ({ tpackage = ["std"]; tname="Type"; tparams=[]; tsub = None},p) true) with TInst(c,_) -> c | t -> assert false in
+		let c_type = match follow (Typeload.load_instance ctx ({ tpackage = ["std"]; tname="Type"; tparams=[]; tsub = None},null_pos) true p) with TInst(c,_) -> c | t -> assert false in
 		let mk_index_call e =
 			if ctx.com.display <> DMNone then
 				(* If we are in display mode there's a chance that these fields don't exist. Let's just use a
@@ -1292,7 +1300,7 @@ module TexprConverter = struct
 					end
 				) cases in
 				let e_subject = match kind with
-					| SKValue -> e_subject
+					| SKValue | SKFakeEnum -> e_subject
 					| SKEnum -> if match_debug then mk_name_call e_subject else mk_index_call e_subject
 					| SKLength -> type_field_access ctx e_subject "length"
 				in

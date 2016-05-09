@@ -57,15 +57,8 @@ type context = {
 	mutable has_error : bool;
 }
 
-type cache = {
-	mutable c_haxelib : (string list, string list) Hashtbl.t;
-	mutable c_files : (string, float * Ast.package) Hashtbl.t;
-	mutable c_modules : (path * string, module_def) Hashtbl.t;
-}
-
 exception Abort
 exception Completion of string
-
 
 let version = 3300
 let version_major = version / 1000
@@ -76,7 +69,6 @@ let version_is_stable = version_minor land 1 = 0
 let measure_times = ref false
 let prompt = ref false
 let start_time = ref (get_time())
-let global_cache = ref None
 
 let path_sep = if Sys.os_type = "Unix" then "/" else "\\"
 
@@ -162,6 +154,7 @@ let htmlescape s =
 	let s = String.concat "&amp;" (ExtString.String.nsplit s "&") in
 	let s = String.concat "&lt;" (ExtString.String.nsplit s "<") in
 	let s = String.concat "&gt;" (ExtString.String.nsplit s ">") in
+	let s = String.concat "&quot;" (ExtString.String.nsplit s "\"") in
 	s
 
 let reserved_flags = [
@@ -682,17 +675,9 @@ let rec process_params create pl =
 	) in
 	loop [] pl
 
-and wait_loop boot_com host port =
-	let sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-	(try Unix.setsockopt sock Unix.SO_REUSEADDR true with _ -> ());
-	(try Unix.bind sock (Unix.ADDR_INET (Unix.inet_addr_of_string host,port)) with _ -> failwith ("Couldn't wait on " ^ host ^ ":" ^ string_of_int port));
-	Unix.listen sock 10;
+and wait_loop verbose accept =
 	Sys.catch_break false;
-	let verbose = boot_com.verbose in
 	let has_parse_error = ref false in
-	if verbose then print_endline ("Waiting on " ^ host ^ ":" ^ string_of_int port);
-	let bufsize = 1024 in
-	let tmp = String.create bufsize in
 	let cache = {
 		c_haxelib = Hashtbl.create 0;
 		c_files = Hashtbl.create 0;
@@ -839,34 +824,8 @@ and wait_loop boot_com host port =
 	);
 	let run_count = ref 0 in
 	while true do
-		let sin, _ = Unix.accept sock in
+		let read, write, close = accept() in
 		let t0 = get_time() in
-		Unix.set_nonblock sin;
-		if verbose then print_endline "Client connected";
-		let b = Buffer.create 0 in
-		let rec read_loop count =
-			let r = try
-				Unix.recv sin tmp 0 bufsize []
-			with Unix.Unix_error((Unix.EWOULDBLOCK|Unix.EAGAIN),_,_) ->
-				0
-			in
-			if verbose then begin
-				if r > 0 then Printf.printf "Reading %d bytes\n" r else print_endline "Waiting for data...";
-			end;
-			Buffer.add_substring b tmp 0 r;
-			if r > 0 && tmp.[r-1] = '\000' then
-				Buffer.sub b 0 (Buffer.length b - 1)
-			else begin
-				if r = 0 then begin
-					ignore(Unix.select [] [] [] 0.05); (* wait a bit *)
-					if count = 100 then
-						failwith "Aborting inactive connection"
-					else
-						read_loop (count + 1);
-				end else
-					read_loop 0;
-			end;
-		in
 		let rec cache_context com =
 			if com.display = DMNone then begin
 				List.iter cache_module com.modules;
@@ -881,8 +840,8 @@ and wait_loop boot_com host port =
 			ctx.flush <- (fun() ->
 				incr compilation_step;
 				compilation_mark := !mark_loop;
-				List.iter (fun s -> ssend sin (s ^ "\n"); if verbose then print_endline ("> " ^ s)) (List.rev ctx.messages);
-				if ctx.has_error then ssend sin "\x02\n" else cache_context ctx.com;
+				List.iter (fun s -> write (s ^ "\n"); if verbose then print_endline ("> " ^ s)) (List.rev ctx.messages);
+				if ctx.has_error then write "\x02\n" else cache_context ctx.com;
 			);
 			ctx.setup <- (fun() ->
 				if verbose then begin
@@ -900,11 +859,11 @@ and wait_loop boot_com host port =
 					Hashtbl.iter (fun _ m -> if m.m_extra.m_file = file then m.m_extra.m_dirty <- true) cache.c_modules
 				end
 			);
-			ctx.com.print <- (fun str -> ssend sin ("\x01" ^ String.concat "\x01" (ExtString.String.nsplit str "\n") ^ "\n"));
+			ctx.com.print <- (fun str -> write ("\x01" ^ String.concat "\x01" (ExtString.String.nsplit str "\n") ^ "\n"));
 			ctx
 		in
 		(try
-			let s = (read_loop 0) in
+			let s = read() in
 			let hxml =
 				try
 					let idx = String.index s '\001' in
@@ -914,7 +873,6 @@ and wait_loop boot_com host port =
 					s
 			in
 			let data = parse_hxml_data hxml in
-			Unix.clear_nonblock sin;
 			if verbose then print_endline ("Processing Arguments [" ^ String.concat "," data ^ "]");
 			(try
 				Common.display_default := DMNone;
@@ -933,11 +891,11 @@ and wait_loop boot_com host port =
 				start_time := get_time();
 				process_params create data;
 				close_times();
-				if !measure_times then report_times (fun s -> ssend sin (s ^ "\n"))
+				if !measure_times then report_times (fun s -> write (s ^ "\n"))
 			with
 			| Completion str ->
 				if verbose then print_endline ("Completion Response =\n" ^ str);
-				ssend sin str
+				write str
 			| Arg.Bad msg ->
 				prerr_endline ("Error: " ^ msg);
 			);
@@ -950,10 +908,10 @@ and wait_loop boot_com host port =
 		| e ->
 			let estr = Printexc.to_string e in
 			if verbose then print_endline ("Uncaught Error : " ^ estr);
-			(try ssend sin estr with _ -> ());
+			(try write estr with _ -> ());
 			if is_debug_run() then print_endline (Printexc.get_backtrace());
 		);
-		Unix.close sin;
+		close();
 		current_stdin := None;
 		(* prevent too much fragmentation by doing some compactions every X run *)
 		incr run_count;
@@ -967,6 +925,70 @@ and wait_loop boot_com host port =
 			end
 		end else Gc.minor();
 	done
+
+and init_wait_stdio() =
+	set_binary_mode_in stdin true;
+	set_binary_mode_out stderr true;
+
+	let chin = IO.input_channel stdin in
+	let cherr = IO.output_channel stderr in
+
+	let berr = Buffer.create 0 in
+	let read = fun () ->
+		let len = IO.read_i32 chin in
+		IO.really_nread chin len
+	in
+	let write = Buffer.add_string berr in
+	let close = fun() ->
+		IO.write_i32 cherr (Buffer.length berr);
+		IO.nwrite cherr (Buffer.contents berr);
+		IO.flush cherr
+	in
+	fun() ->
+		Buffer.clear berr;
+		read, write, close
+
+and init_wait_socket verbose host port =
+	let sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+	(try Unix.setsockopt sock Unix.SO_REUSEADDR true with _ -> ());
+	(try Unix.bind sock (Unix.ADDR_INET (Unix.inet_addr_of_string host,port)) with _ -> failwith ("Couldn't wait on " ^ host ^ ":" ^ string_of_int port));
+	if verbose then print_endline ("Waiting on " ^ host ^ ":" ^ string_of_int port);
+	Unix.listen sock 10;
+	let bufsize = 1024 in
+	let tmp = String.create bufsize in
+	let accept() = (
+		let sin, _ = Unix.accept sock in
+		Unix.set_nonblock sin;
+		if verbose then print_endline "Client connected";
+		let b = Buffer.create 0 in
+		let rec read_loop count =
+			try
+				let r = Unix.recv sin tmp 0 bufsize [] in
+				if r = 0 then
+					failwith "Incomplete request"
+				else begin
+					if verbose then Printf.printf "Reading %d bytes\n" r;
+					Buffer.add_substring b tmp 0 r;
+					if tmp.[r-1] = '\000' then
+						Buffer.sub b 0 (Buffer.length b - 1)
+					else
+						read_loop 0
+				end
+			with Unix.Unix_error((Unix.EWOULDBLOCK|Unix.EAGAIN),_,_) ->
+				if count = 100 then
+					failwith "Aborting inactive connection"
+				else begin
+					if verbose then print_endline "Waiting for data...";
+					ignore(Unix.select [] [] [] 0.05); (* wait a bit *)
+					read_loop (count + 1);
+				end
+		in
+		let read = fun() -> (let s = read_loop 0 in Unix.clear_nonblock sin; s) in
+		let write = ssend sin in
+		let close() = Unix.close sin in
+		read, write, close
+	) in
+	accept
 
 and do_connect host port args =
 	let sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
@@ -1260,37 +1282,33 @@ try
 				let file, pos = try ExtString.String.split file_pos "@" with _ -> failwith ("Invalid format : " ^ file_pos) in
 				let file = unquote file in
 				let pos, smode = try ExtString.String.split pos "@" with _ -> pos,"" in
-				let activate_special_display_mode () =
-					Common.define com Define.NoCOpt;
-					Parser.use_parser_resume := false
-				in
 				let mode = match smode with
 					| "position" ->
-						activate_special_display_mode();
+						Common.define com Define.NoCOpt;
 						DMPosition
 					| "usage" ->
-						activate_special_display_mode();
+						Common.define com Define.NoCOpt;
 						DMUsage
 					| "type" ->
-						activate_special_display_mode();
+						Common.define com Define.NoCOpt;
 						DMType
 					| "toplevel" ->
-						activate_special_display_mode();
-						DMToplevel
-					| "document-symbols" ->
 						Common.define com Define.NoCOpt;
-						DMDocumentSymbols;
+						DMToplevel
+					| "module-symbols" ->
+						Common.define com Define.NoCOpt;
+						DMModuleSymbols;
+					| "diagnostics" ->
+						Common.define com Define.NoCOpt;
+						DMDiagnostics;
 					| "" ->
-						Parser.use_parser_resume := true;
 						DMDefault
 					| _ ->
 						let smode,arg = try ExtString.String.split smode "@" with _ -> pos,"" in
 						match smode with
 							| "resolve" ->
-								activate_special_display_mode();
 								DMResolve arg
 							| _ ->
-								Parser.use_parser_resume := true;
 								DMDefault
 				in
 				let pos = try int_of_string pos with _ -> failwith ("Invalid format : "  ^ pos) in
@@ -1342,8 +1360,15 @@ try
 			evals := s :: !evals;
 		), " : evaluates argument as Haxe module code");
 		("--wait", Arg.String (fun hp ->
-			let host, port = (try ExtString.String.split hp ":" with _ -> "127.0.0.1", hp) in
-			wait_loop com host (try int_of_string port with _ -> raise (Arg.Bad "Invalid port"))
+			let accept = match hp with
+				| "stdio" ->
+					init_wait_stdio()
+				| _ ->
+					let host, port = (try ExtString.String.split hp ":" with _ -> "127.0.0.1", hp) in
+					let port = try int_of_string port with _ -> raise (Arg.Bad "Invalid port") in
+					init_wait_socket com.verbose host port
+			in
+			wait_loop com.verbose accept
 		),"<[host:]port> : wait on the given port for commands to run)");
 		("--connect",Arg.String (fun _ ->
 			assert false
@@ -1441,7 +1466,7 @@ try
 	process ctx.com.args;
 	process_libs();
 	if com.display <> DMNone then begin
-		com.warning <- message ctx;
+		com.warning <- if com.display = DMDiagnostics then (fun s p -> add_diagnostics_message com s p DiagnosticsSeverity.Warning) else message ctx;
 		com.error <- error ctx;
 		com.main_class <- None;
 		if com.display <> DMUsage then
@@ -1573,8 +1598,8 @@ try
 		Typer.finalize tctx;
 		t();
 		if ctx.has_error then raise Abort;
-		begin match com.display with
-			| DMNone | DMUsage ->
+		begin match ctx.com.display with
+			| DMNone | DMUsage | DMDiagnostics ->
 				()
 			| _ ->
 				if ctx.has_next then raise Abort;
@@ -1731,9 +1756,9 @@ with
 	| Display.DisplaySignatures tl ->
 		let ctx = print_context() in
 		let b = Buffer.create 0 in
-		List.iter (fun t ->
+		List.iter (fun (t,doc) ->
 			Buffer.add_string b "<type>\n";
-			Buffer.add_string b (htmlescape (s_type ctx t));
+			Buffer.add_string b (htmlescape (s_type ctx (follow t)));
 			Buffer.add_string b "\n</type>\n";
 		) tl;
 		raise (Completion (Buffer.contents b))
@@ -1754,14 +1779,23 @@ with
 		Buffer.add_string b "<il>\n";
 		let ctx = print_context() in
 		let s_type t = htmlescape (s_type ctx t) in
+		let s_doc d = Option.map_default (fun s -> Printf.sprintf " d=\"%s\"" (htmlescape s)) "" d in
 		List.iter (fun id -> match id with
-			| Display.ITLocal v -> Buffer.add_string b (Printf.sprintf "<i k=\"local\" t=\"%s\">%s</i>\n" (s_type v.v_type) v.v_name);
-			| Display.ITMember(c,cf) -> Buffer.add_string b (Printf.sprintf "<i k=\"member\" t=\"%s\">%s</i>\n" (s_type cf.cf_type) cf.cf_name);
-			| Display.ITStatic(c,cf) -> Buffer.add_string b (Printf.sprintf "<i k=\"static\" t=\"%s\">%s</i>\n" (s_type cf.cf_type) cf.cf_name);
-			| Display.ITEnum(en,ef) -> Buffer.add_string b (Printf.sprintf "<i k=\"enum\" t=\"%s\">%s</i>\n" (s_type ef.ef_type) ef.ef_name);
-			| Display.ITGlobal(mt,s,t) -> Buffer.add_string b (Printf.sprintf "<i k=\"global\" p=\"%s\" t=\"%s\">%s</i>\n" (s_type_path (t_infos mt).mt_path) (s_type t) s);
-			| Display.ITType(mt) -> Buffer.add_string b (Printf.sprintf "<i k=\"type\" p=\"%s\">%s</i>\n" (s_type_path (t_infos mt).mt_path) (snd (t_infos mt).mt_path));
-			| Display.ITPackage s -> Buffer.add_string b (Printf.sprintf "<i k=\"package\">%s</i>\n" s)
+			| IdentifierType.ITLocal v ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"local\" t=\"%s\">%s</i>\n" (s_type v.v_type) v.v_name);
+			| IdentifierType.ITMember(c,cf) ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"member\" t=\"%s\"%s>%s</i>\n" (s_type cf.cf_type) (s_doc cf.cf_doc) cf.cf_name);
+			| IdentifierType.ITStatic(c,cf) ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"static\" t=\"%s\"%s>%s</i>\n" (s_type cf.cf_type) (s_doc cf.cf_doc) cf.cf_name);
+			| IdentifierType.ITEnum(en,ef) ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"enum\" t=\"%s\"%s>%s</i>\n" (s_type ef.ef_type) (s_doc ef.ef_doc) ef.ef_name);
+			| IdentifierType.ITGlobal(mt,s,t) ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"global\" p=\"%s\" t=\"%s\">%s</i>\n" (s_type_path (t_infos mt).mt_path) (s_type t) s);
+			| IdentifierType.ITType(mt) ->
+				let infos = t_infos mt in
+				Buffer.add_string b (Printf.sprintf "<i k=\"type\" p=\"%s\"%s>%s</i>\n" (s_type_path infos.mt_path) (s_doc infos.mt_doc) (snd infos.mt_path));
+			| IdentifierType.ITPackage s ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"package\">%s</i>\n" s)
 		) il;
 		Buffer.add_string b "</il>";
 		raise (Completion (Buffer.contents b))
@@ -1824,7 +1858,7 @@ with
 				raise (Completion c)
 			| _ ->
 				error ctx ("Could not load module " ^ (Ast.s_type_path (p,c))) Ast.null_pos)
-	| Display.DocumentSymbols s ->
+	| Display.ModuleSymbols s | Display.Diagnostics s ->
 		raise (Completion s)
 	| Interp.Sys_exit i ->
 		ctx.flush();

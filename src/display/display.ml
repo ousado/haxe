@@ -1,6 +1,7 @@
 open Ast
 open Common
 open Type
+open Typecore
 
 (* order of these variants affects output sorting *)
 type display_field_kind =
@@ -9,31 +10,23 @@ type display_field_kind =
 	| FKType
 	| FKPackage
 
-type identifier_type =
-	| ITLocal of tvar
-	| ITMember of tclass * tclass_field
-	| ITStatic of tclass * tclass_field
-	| ITEnum of tenum * tenum_field
-	| ITGlobal of module_type * string * t
-	| ITType of module_type
-	| ITPackage of string
-
-exception DocumentSymbols of string
-exception DisplaySignatures of t list
+exception Diagnostics of string
+exception ModuleSymbols of string
+exception DisplaySignatures of (t * documentation) list
 exception DisplayType of t * pos
 exception DisplayPosition of Ast.pos list
 exception DisplaySubExpression of Ast.expr
 exception DisplayFields of (string * t * display_field_kind option * documentation) list
-exception DisplayToplevel of identifier_type list
+exception DisplayToplevel of IdentifierType.t list
 
-let is_display_file p =
-	Common.unique_full_path p.pfile = (!Parser.resume_display).pfile
+let is_display_file file =
+	file <> "?" && Common.unique_full_path file = (!Parser.resume_display).pfile
 
 let encloses_position p_target p =
 	p.pmin <= p_target.pmin && p.pmax >= p_target.pmax
 
 let is_display_position p =
-	is_display_file p && encloses_position !Parser.resume_display p
+	encloses_position !Parser.resume_display p
 
 let find_enclosing com e =
 	let display_pos = ref (!Parser.resume_display) in
@@ -126,61 +119,53 @@ let display_field dm cf p = match dm with
 	| DMType -> raise (DisplayType (cf.cf_type,p))
 	| _ -> ()
 
+let display_enum_field dm ef p = match dm with
+	| DMPosition -> raise (DisplayPosition [p]);
+	| DMUsage -> ef.ef_meta <- (Meta.Usage,[],p) :: ef.ef_meta;
+	| DMType -> raise (DisplayType (ef.ef_type,p))
+	| _ -> ()
+
 module SymbolKind = struct
 	type t =
-		| File
-		| Module
-		| Namespace
-		| Package
 		| Class
-		| Method
-		| Property
-		| Field
-		| Constructor
-		| Enum
 		| Interface
+		| Enum
+		| Typedef
+		| Abstract
+		| Field
+		| Property
+		| Method
+		| Constructor
 		| Function
 		| Variable
-		| Constant
-		| String
-		| Number
-		| Boolean
-		| Array
 
 	let to_int = function
-		| File -> 1
-		| Module -> 2
-		| Namespace -> 3
-		| Package -> 4
-		| Class -> 5
-		| Method -> 6
+		| Class -> 1
+		| Interface -> 2
+		| Enum -> 3
+		| Typedef -> 4
+		| Abstract -> 5
+		| Field -> 6
 		| Property -> 7
-		| Field -> 8
+		| Method -> 8
 		| Constructor -> 9
-		| Enum -> 10
-		| Interface -> 11
-		| Function -> 12
-		| Variable -> 13
-		| Constant -> 14
-		| String -> 15
-		| Number -> 16
-		| Boolean -> 17
-		| Array -> 18
+		| Function -> 10
+		| Variable -> 11
 end
 
 module SymbolInformation = struct
 	type t = {
 		name : string;
 		kind : SymbolKind.t;
-		location : pos;
-		containerName : string option;
+		pos : pos;
+		container_name : string option;
 	}
 
-	let make name kind location containerName = {
+	let make name kind pos container_name = {
 		name = name;
 		kind = kind;
-		location = location;
-		containerName = containerName;
+		pos = pos;
+		container_name = container_name;
 	}
 end
 
@@ -188,19 +173,18 @@ open SymbolKind
 open SymbolInformation
 open Json
 
-let pos_to_json_location p =
+let pos_to_json_range p =
 	if p.pmin = -1 then
 		JNull
 	else
 		let l1, p1, l2, p2 = Lexer.get_pos_coords p in
-		let to_json l c = JObject [("line", JInt l); ("character", JInt c)] in
+		let to_json l c = JObject [("line", JInt (l - 1)); ("character", JInt c)] in
 		JObject [
-			("file", JString (Common.unique_full_path p.pfile));
 			("start", to_json l1 p1);
 			("end", to_json l2 p2);
 		]
 
-let print_document_symbols (pack,decls) =
+let print_module_symbols (pack,decls) =
 	let l = DynArray.create() in
 	let add name kind location parent =
 		let si = SymbolInformation.make name kind location (match parent with None -> None | Some si -> Some si.name) in
@@ -278,21 +262,21 @@ let print_document_symbols (pack,decls) =
 				ignore (add (fst ef.ec_name) Method ef.ec_pos (Some si_type))
 			) d.d_data
 		| ETypedef d ->
-			let si_type = add (fst d.d_name) Interface p si_pack in
+			let si_type = add (fst d.d_name) Typedef p si_pack in
 			(match d.d_data with
 			| CTAnonymous fields,_ ->
 				List.iter (field si_type) fields
 			| _ -> ())
 		| EAbstract d ->
-			let si_type = add (fst d.d_name) Class p si_pack in
+			let si_type = add (fst d.d_name) Abstract p si_pack in
 			List.iter (field si_type) d.d_data
 	) decls;
 	let jl = List.map (fun si ->
 		let l =
 			("name",JString si.name) ::
 			("kind",JInt (to_int si.kind)) ::
-			("location", pos_to_json_location si.location) ::
-			(match si.containerName with None -> [] | Some s -> ["containerName",JString s])
+			("range", pos_to_json_range si.pos) ::
+			(match si.container_name with None -> [] | Some s -> ["containerName",JString s])
 		in
 		JObject l
 	) (DynArray.to_list l) in
@@ -300,3 +284,139 @@ let print_document_symbols (pack,decls) =
 	let b = Buffer.create 0 in
 	write_json (Buffer.add_string b) js;
 	Buffer.contents b
+
+type import_display_kind =
+	| IDKPackage of string list
+	| IDKModule of string list * string
+	| IDKSubType of string list * string * string
+	| IDKModuleField of string list * string * string
+	| IDKSubTypeField of string list * string * string * string
+	| IDK
+
+type import_display = import_display_kind * pos
+
+let convert_import_to_something_usable path =
+	let rec loop pack m t = function
+		| (s,p) :: l ->
+			let is_lower = is_lower_ident s in
+			let is_display_pos = encloses_position !Parser.resume_display p in
+			begin match is_lower,m,t with
+				| _,None,Some _ | false,Some _,Some _ ->
+					assert false (* impossible, I think *)
+				| true,Some m,None ->
+					if is_display_pos then (IDKModuleField(List.rev pack,m,s),p)
+					else (IDK,p) (* assume that we're done *)
+				| true,Some m,Some t ->
+					if is_display_pos then (IDKSubTypeField(List.rev pack,m,t,s),p)
+					else (IDK,p)
+				| true,None,None ->
+					if is_display_pos then (IDKPackage (List.rev (s :: pack)),p)
+					else loop (s :: pack) m t l
+				| false,Some sm,None ->
+					if is_display_pos then (IDKSubType (List.rev pack,sm,s),p)
+					else loop pack m (Some s) l
+				| false,None,None ->
+					if is_display_pos then (IDKModule (List.rev pack,s),p)
+					else loop pack (Some s) None l
+			end
+		| [] ->
+			(IDK,null_pos)
+	in
+	loop [] None None path
+
+let process_expr com e = match com.display with
+	| DMToplevel -> find_enclosing com e
+	| DMPosition | DMUsage | DMType -> find_before_pos com e
+	| _ -> e
+
+let add_import_position com p =
+	com.shared.shared_display_information.import_positions <- PMap.add p (ref false) com.shared.shared_display_information.import_positions
+
+let mark_import_position com p =
+	try
+		let r = PMap.find p com.shared.shared_display_information.import_positions in
+		r := true
+	with Not_found ->
+		()
+
+module Diagnostics = struct
+	module DiagnosticsKind = struct
+		type t =
+			| DKUnusedImport
+			| DKUnresolvedIdentifier
+			| DKCompilerError
+
+		let to_int = function
+			| DKUnusedImport -> 0
+			| DKUnresolvedIdentifier -> 1
+			| DKCompilerError -> 2
+	end
+
+	type t = DiagnosticsKind.t * pos
+
+	module UnresolvedIdentifierSuggestion = struct
+		type t =
+			| UISImport
+			| UISTypo
+
+		let to_int = function
+			| UISImport -> 0
+			| UISTypo -> 1
+	end
+
+	open UnresolvedIdentifierSuggestion
+	open DiagnosticsKind
+
+	let print_diagnostics com =
+		let diag = DynArray.create() in
+		let add dk p sev args =
+			DynArray.add diag (dk,p,sev,args)
+		in
+		begin match !(Common.global_cache) with
+			| None ->
+				()
+			| Some cache ->
+				let find_type i =
+					let types = ref [] in
+					Hashtbl.iter (fun _ m ->
+						List.iter (fun mt ->
+							let tinfos = t_infos mt in
+							if snd tinfos.mt_path = i then
+								types := JObject [
+									"kind",JInt (UnresolvedIdentifierSuggestion.to_int UISImport);
+									"name",JString (s_type_path m.m_path)
+								] :: !types
+						) m.m_types;
+					) cache.c_modules;
+					!types
+				in
+			List.iter (fun (s,p,suggestions) ->
+				let suggestions = List.map (fun (s,_) ->
+					JObject [
+						"kind",JInt (UnresolvedIdentifierSuggestion.to_int UISTypo);
+						"name",JString s
+					]
+				) suggestions in
+				add DKUnresolvedIdentifier p DiagnosticsSeverity.Error (suggestions @ (find_type s));
+			) com.display_information.unresolved_identifiers;
+		end;
+		PMap.iter (fun p r ->
+			if not !r then add DKUnusedImport p DiagnosticsSeverity.Warning []
+		) com.shared.shared_display_information.import_positions;
+		List.iter (fun (s,p,sev) ->
+			add DKCompilerError p sev [JString s]
+		) com.shared.shared_display_information.diagnostics_messages;
+		let jl = DynArray.fold_left (fun acc (dk,p,sev,args) ->
+			(JObject [
+				"kind",JInt (to_int dk);
+				"severity",JInt (DiagnosticsSeverity.to_int sev);
+				"range",pos_to_json_range p;
+				"args",JArray args
+			]) :: acc
+		) [] diag in
+		let js = JArray jl in
+		let b = Buffer.create 0 in
+		write_json (Buffer.add_string b) js;
+		Buffer.contents b
+end
+

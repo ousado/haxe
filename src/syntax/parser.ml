@@ -71,7 +71,6 @@ let unquote_ident f =
 let cache = ref (DynArray.create())
 let last_doc = ref None
 let use_doc = ref false
-let use_parser_resume = ref true
 let resume_display = ref null_pos
 let in_macro = ref false
 
@@ -91,7 +90,7 @@ let type_path sl in_import = match sl with
 
 let is_resuming p =
 	let p2 = !resume_display in
-	p.pmax = p2.pmin && !use_parser_resume && Common.unique_full_path p.pfile = p2.pfile
+	p.pmax = p2.pmin && Common.unique_full_path p.pfile = p2.pfile
 
 let set_resume p =
 	resume_display := { p with pfile = Common.unique_full_path p.pfile }
@@ -234,9 +233,23 @@ let reify in_macro =
 		mk_enum "TypeParam" n [v] p
 	and to_tpath (t,_) p =
 		let len = String.length t.tname in
-		if t.tpackage = [] && len > 1 && t.tname.[0] = '$' then
-			(EConst (Ident (String.sub t.tname 1 (len - 1))),p)
-		else begin
+		if t.tpackage = [] && len > 1 && t.tname.[0] = '$' then begin
+			let name = String.sub t.tname 1 (len - 1) in
+			let ei = (EConst (Ident name),p) in
+			match t.tparams with
+			| [] -> ei
+			| _ ->
+				(* `macro : $TP<Int>` conveys the intent to use TP and overwrite the
+				   type parameters. *)
+				let ea = to_array to_tparam t.tparams p in
+				let fields = [
+					("pack", (EField(ei,"pack"),p));
+					("name", (EField(ei,"name"),p));
+					("sub", (EField(ei,"sub"),p));
+					("params", ea);
+				] in
+				to_obj fields p
+		end else begin
 			let fields = [
 				("pack", to_array to_string t.tpackage p);
 				("name", to_string t.tname p);
@@ -595,7 +608,7 @@ and parse_type_decls pack acc s =
 and parse_type_decl s =
 	match s with parser
 	| [< '(Kwd Import,p1) >] -> parse_import s p1
-	| [< '(Kwd Using,p1); t = parse_type_path; p2 = semicolon >] -> EUsing t, punion p1 p2
+	| [< '(Kwd Using,p1) >] -> parse_using s p1
 	| [< doc = get_doc; meta = parse_meta; c = parse_common_flags; s >] ->
 		match s with parser
 		| [< n , p1 = parse_enum_flags; name = type_name; tl = parse_constraint_params; '(BrOpen,_); l = plist parse_enum; '(BrClose,p2) >] ->
@@ -690,6 +703,29 @@ and parse_import s p1 =
 	) in
 	(EImport (path,mode),punion p1 p2)
 
+and parse_using s p1 =
+	let rec loop acc =
+		match s with parser
+		| [< '(Dot,p) >] ->
+			begin match s with parser
+			| [< '(Const (Ident k),p) >] ->
+				loop ((k,p) :: acc)
+			| [< '(Kwd Macro,p) >] ->
+				loop (("macro",p) :: acc)
+			| [< '(Kwd Extern,p) >] ->
+				loop (("extern",p) :: acc)
+			| [< >] ->
+				serror()
+			end
+		| [< '(Semicolon,p2) >] ->
+			p2,List.rev acc
+	in
+	let p2, path = (match s with parser
+		| [< '(Const (Ident name),p) >] -> loop [name,p]
+		| [< >] -> serror()
+	) in
+	(EUsing path,punion p1 p2)
+
 and parse_abstract_relations s =
 	match s with parser
 	| [< '(Const (Ident "to"),_); t = parse_complex_type >] -> AToType t
@@ -706,7 +742,7 @@ and parse_class_fields tdecl p1 s =
 	let l = parse_class_field_resume tdecl s in
 	let p2 = (match s with parser
 		| [< '(BrClose,p2) >] -> p2
-		| [< >] -> if do_resume() then p1 else serror()
+		| [< >] -> if do_resume() then pos (last_token s) else serror()
 	) in
 	l, p2
 
@@ -1217,7 +1253,16 @@ and expr = parser
 		| [< '(Binop OpOr,p2) when do_resume() >] ->
 			set_resume p1;
 			display (EDisplay ((EObjectDecl [],p1),false),p1);
-		| [< b = block1; '(BrClose,p2); s >] ->
+		| [< b = block1; s >] ->
+			let p2 = match s with parser
+				| [< '(BrClose,p2) >] -> p2
+				| [< >] ->
+					(* Ignore missing } if we are resuming and "guess" the last position. *)
+					if do_resume() then begin match Stream.peek s with
+						| Some (_,p) -> p
+						| None -> pos (last_token s)
+					end else serror()
+			in
 			let e = (b,punion p1 p2) in
 			(match b with
 			| EObjectDecl _ -> expr_next e s
