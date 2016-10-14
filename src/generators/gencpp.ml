@@ -7213,6 +7213,13 @@ let generate_cppia ctx =
 ;;
 
 
+type parmap_in =
+      | ParClass of int * Type.module_type * Type.tclass
+      | ParEnum  of int * Type.module_type * Type.tenum * Type.texpr option
+
+type parmap_out =
+      int * Type.path list
+
 (*
  The common_ctx contains the haxe AST in the "types" field and the resources
 *)
@@ -7233,6 +7240,11 @@ let generate_source ctx =
    let build_xml = ref "" in
    let scriptable = (Common.defined common_ctx Define.Scriptable) in
 
+   let _job_id = ref 0 in
+   let job_id () = let id = !_job_id in _job_id := !_job_id + 1;
+      id
+   in
+   let parmap_in = ref [] in
    List.iter (fun object_def ->
       (* check if any @:objc class is referenced while '-D objc' is not defined
          This will guard all code changes to this flag *)
@@ -7259,9 +7271,11 @@ let generate_source ctx =
                boot_classes := class_def.cl_path ::  !boot_classes
             else if not (has_meta_key class_def.cl_meta Meta.NativeGen) then
                nonboot_classes := class_def.cl_path ::  !nonboot_classes;
+               parmap_in := ParClass((job_id()),object_def,class_def) :: !parmap_in;
+            (*
             let deps = generate_class_files ctx super_deps constructor_deps class_def scriptable in
             if not (class_def.cl_interface && (is_native_gen_class class_def)) then
-               exe_classes := (class_def.cl_path, deps, object_def)  ::  !exe_classes;
+               exe_classes := (class_def.cl_path, deps, object_def)  ::  !exe_classes; *)
          end
       | TEnumDecl enum_def when enum_def.e_extern -> ()
       | TEnumDecl enum_def ->
@@ -7274,13 +7288,34 @@ let generate_source ctx =
             if (enum_def.e_extern) then
                (if (debug>1) then print_endline ("external enum " ^ name ));
             boot_enums := enum_def.e_path :: !boot_enums;
-            let deps = generate_enum_files ctx enum_def super_deps meta in
-            exe_classes := (enum_def.e_path, deps, object_def) :: !exe_classes;
+            parmap_in := ParEnum((job_id()),object_def,enum_def,meta) :: !parmap_in;
+            (* let deps = generate_enum_files ctx enum_def super_deps meta in
+            exe_classes := (enum_def.e_path, deps, object_def) :: !exe_classes; *)
          end
       | TTypeDecl _ | TAbstractDecl _ -> (* already done *) ()
       );
    ) common_ctx.types;
 
+
+
+   let parmap_out = Parmap.parmap ( fun pmin -> match pmin with
+      | ParClass(job_id,object_def,class_def) ->    job_id,generate_class_files ctx super_deps constructor_deps class_def scriptable
+      | ParEnum(job_id,object_def,enum_def,meta) -> job_id,generate_enum_files ctx enum_def super_deps meta
+   ) (Parmap.L !parmap_in) in
+
+   let job_map = Hashtbl.create(List.length !parmap_in) in
+      List.iter ( fun (job_id,res) -> Hashtbl.add job_map job_id res )
+   parmap_out;
+
+   List.iter ( function
+      | ParClass(job_id,object_def,class_def) ->
+            let deps = Hashtbl.find job_map job_id in
+            if not (class_def.cl_interface && (is_native_gen_class class_def)) then
+               exe_classes := (class_def.cl_path, deps, object_def)  ::  !exe_classes;
+      | ParEnum(job_id,object_def,enum_def,meta) ->
+            let deps = Hashtbl.find job_map job_id in
+            exe_classes := (enum_def.e_path, deps, object_def) :: !exe_classes;
+   ) !parmap_in;
 
    (match common_ctx.main with
    | None -> generate_dummy_main common_ctx
