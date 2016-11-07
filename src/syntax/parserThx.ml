@@ -1220,6 +1220,7 @@ and parse_array_decl = parser
 and parse_var_decl_head = parser
 	| [< name, p = dollar_ident; t = popt parse_type_hint_with_pos >] -> (name,t,p)
 
+
 and parse_var_assignment = parser
 	| [< '(Binop OpAssign,p1); s >] ->
 		begin match s with parser
@@ -1242,6 +1243,23 @@ and parse_var_decls_next vl = parser
 		vl
 
 and parse_var_decls p1 = parser
+	| [< '(POpen,p1); idl = psep Comma dollar_ident; '(PClose,p2); t = popt parse_type_hint_with_pos; s >] ->
+		let eo = parse_var_assignment s in (match eo with
+		| Some(e) ->
+			let len = List.length idl in
+			let tuple = "_t" ^ (string_of_int len) in
+			let v1 = (tuple,(punion p1 p2)),t,eo in
+			let vl = List.mapi (fun idx (n,p) ->
+				let e =
+						EField( (EConst(Ident tuple),p),("_"^(string_of_int idx))
+						),p in
+				(n,p),None,(Some e)
+			) idl in
+			prerr_endline (Ast.s_expr (EVars(v1 :: vl),punion p1 (pos e)) );
+			v1 :: vl
+			(* (EVars(v1 :: vl),punion p1 (pos e)) *)
+		| _ -> error (Custom "Missing assignment to tuple destructuring") p1)
+
 	| [< name,t,pn = parse_var_decl_head; s >] ->
 		let eo = parse_var_assignment s in
 		List.rev (parse_var_decls_next [(name,pn),t,eo] s)
@@ -1376,8 +1394,7 @@ and expr ?(in_case=false) =
 				let fields = List.mapi ( fun idx id -> ("_"^(string_of_int idx),(snd id)),((EConst (Ident(fst id))),(snd id)) ) el in
 				EObjectDecl(fields),punion p1 p2
 			| [< >] -> serror()
-		end else
-		(match s with parser
+		end else (match s with parser
 		| [< '(PClose,p2); '(Arrow,pa); e = expr; s >] ->
 			arrow_function p1 [] e
 		| [< '(Question,p2); al = psep Comma parse_fun_param; '(PClose,_); '(Arrow,pa); e = expr; >] ->
