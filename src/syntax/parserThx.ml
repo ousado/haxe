@@ -1243,22 +1243,30 @@ and parse_var_decls_next vl = parser
 		vl
 
 and parse_var_decls p1 = parser
-	| [< '(POpen,p1); idl = psep Comma dollar_ident; '(PClose,p2); t = popt parse_type_hint_with_pos; s >] ->
-		let eo = parse_var_assignment s in (match eo with
-		| Some(e) ->
-			let len = List.length idl in
-			let tuple = "_t" ^ (string_of_int len) in
-			let v1 = (tuple,(punion p1 p2)),t,eo in
-			let vl = List.mapi (fun idx (n,p) ->
-				let e =
-						EField( (EConst(Ident tuple),p),("_"^(string_of_int idx))
-						),p in
-				(n,p),None,(Some e)
-			) idl in
-			prerr_endline (Ast.s_expr (EVars(v1 :: vl),punion p1 (pos e)) );
-			v1 :: vl
-			(* (EVars(v1 :: vl),punion p1 (pos e)) *)
-		| _ -> error (Custom "Missing assignment to tuple destructuring") p1)
+	| [< '(POpen,p1); v1 = dollar_ident; s >] ->
+		let destructure_tuple idl t nopt p2 =
+			let eo = parse_var_assignment s in (match eo with
+			| Some(e) ->
+				let len = List.length idl in
+				let tuple = (match nopt with Some (n,_) -> n | _ -> "_t" ^ (string_of_int len)) in
+				let v1 = (tuple,(punion p1 p2)),t,eo in
+				let vl = List.mapi (fun idx (n,p) ->
+					let e =	EField( (EConst(Ident tuple),p),("_"^(string_of_int idx)) ),p in
+					(n,p),None,(Some e)
+				) idl in
+				prerr_endline (Ast.s_expr (EVars(v1 :: vl),punion p1 (pos e)) );
+				v1 :: vl
+				(* (EVars(v1 :: vl),punion p1 (pos e)) *)
+			| _ -> error (Custom "Missing assignment to tuple destructuring") p1)
+		in
+		(match s with parser
+			| [< '((Binop OpAssign),pa); '(POpen,p1); idl = psep Comma dollar_ident; '(PClose,p2); '(PClose,p2); t = popt parse_type_hint_with_pos; s >] ->
+				destructure_tuple idl t (Some v1) p2
+			| [< '(Comma,p1); idl = psep Comma dollar_ident; '(PClose,p2); t = popt parse_type_hint_with_pos; s >] ->
+				destructure_tuple (v1 :: idl) t None p2
+		)
+		(*idl = psep Comma dollar_ident; '(PClose,p2); t = popt parse_type_hint_with_pos; s >] ->*)
+
 
 	| [< name,t,pn = parse_var_decl_head; s >] ->
 		let eo = parse_var_assignment s in
