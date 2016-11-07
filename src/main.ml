@@ -481,6 +481,7 @@ try
 	com.error <- error ctx;
 	if CompilationServer.runs() then com.run_command <- run_command ctx;
 	Parser.display_error := (fun e p -> com.error (Parser.error_msg e) p);
+	ParserThx.display_error := (fun e p -> com.error (Parser.error_msg e) p);
 	Parser.use_doc := !Common.display_default <> DMNone || (CompilationServer.runs());
 	com.class_path <- get_std_class_paths ();
 	com.std_path <- List.filter (fun p -> ExtString.String.ends_with p "std/" || ExtString.String.ends_with p "std\\") com.class_path;

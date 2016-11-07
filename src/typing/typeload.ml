@@ -239,10 +239,15 @@ let module_pass_1 ctx m tdecls loadp =
 	decls, List.rev tdecls
 
 let parse_file_from_lexbuf com file p lexbuf =
+	let thx = ExtString.String.ends_with file ".thx" in
 	let t = Common.timer ["parsing"] in
 	Lexer.init file true;
 	incr stats.s_files_parsed;
-	let data = (try Parser.parse com lexbuf with e -> t(); raise e) in
+	let data = if thx then
+		(try ParserThx.parse com lexbuf with e -> t(); raise e)
+		else
+		(try Parser.parse com lexbuf with e -> t(); raise e)
+	in
 	begin match !display_default with
 		| DMModuleSymbols filter when filter <> None || Display.is_display_file file ->
 			let ds = Display.DocumentSymbols.collect_module_symbols data in
@@ -3521,8 +3526,10 @@ let resolve_module_file com m remap p =
 				with Not_found -> x
 			) in
 			String.concat "/" (x :: l) ^ "/" ^ name
-	) ^ ".hx" in
-	let file = Common.find_file com file in
+	) in
+	let file = try Common.find_file com (file ^ ".thx") with _ ->
+				   Common.find_file com (file ^ ".hx")
+	in
 	let file = (match String.lowercase (snd m) with
 	| "con" | "aux" | "prn" | "nul" | "com1" | "com2" | "com3" | "lpt1" | "lpt2" | "lpt3" when Sys.os_type = "Win32" ->
 		(* these names are reserved by the OS - old DOS legacy, such files cannot be easily created but are reported as visible *)

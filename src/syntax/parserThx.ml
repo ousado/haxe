@@ -1308,6 +1308,7 @@ and arrow_first_param e =
 		let (np,tpt) = arrow_ident_checktype e in np,false,[],tpt,None
 	)
 
+
 and expr ?(in_case=false) =
 	let expr_next = expr_next ~in_case:in_case in parser
 	| [< (name,params,p) = parse_meta_entry; s >] ->
@@ -1369,7 +1370,14 @@ and expr ?(in_case=false) =
 			if do_resume() then (ENew(t,[]),punion p1 (pos t))
 			else serror()
 		end
-	| [< '(POpen,p1); s >] -> (match s with parser
+	| [< '(POpen,p1); s >] ->
+		if in_case then begin match s with parser
+			| [< el = psep Comma dollar_ident; '(PClose,p2); s >] ->
+				let fields = List.mapi ( fun idx id -> ("_"^(string_of_int idx),(snd id)),((EConst (Ident(fst id))),(snd id)) ) el in
+				EObjectDecl(fields),punion p1 p2
+			| [< >] -> serror()
+		end else
+		(match s with parser
 		| [< '(PClose,p2); '(Arrow,pa); e = expr; s >] ->
 			arrow_function p1 [] e
 		| [< '(Question,p2); al = psep Comma parse_fun_param; '(PClose,_); '(Arrow,pa); e = expr; >] ->
@@ -1379,7 +1387,7 @@ and expr ?(in_case=false) =
 			| [< '(PClose,p2); s >] -> expr_next (EParenthesis e, punion p1 p2) s
 			| [< '(Const (Ident "is"),p_is); t = parse_type_path; '(PClose,p2); >] -> expr_next (make_is e t (punion p1 p2) p_is) s
 			| [< '(Comma,pc); al = psep Comma parse_fun_param; '(PClose,_); '(Arrow,pa); e2 = expr; s >] ->
-				prerr_endline ("Comma,pc e:" ^ (Ast.s_expr e) ^  "e2:" ^ (Ast.s_expr e2));
+				(* prerr_endline ("Comma,pc e:" ^ (Ast.s_expr e) ^  "e2:" ^ (Ast.s_expr e2)); *)
 				arrow_function p1 ((arrow_first_param e) :: al) e2
 			| [< '((Binop OpAssign),p2); ea1 = expr; s >] ->
 				let with_args al e2 = (match e with
