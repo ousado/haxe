@@ -1304,7 +1304,9 @@ and arrow_first_param e =
 		let (np,tpt) = arrow_ident_checktype e1 in np,true,[],tpt,(Some e2)
 	| EParenthesis(e) ->
 		let (np,tpt) = arrow_ident_checktype e in np,false,[],tpt,None
-	| _ -> serror())
+	| _ ->
+		let (np,tpt) = arrow_ident_checktype e in np,false,[],tpt,None
+	)
 
 and expr ?(in_case=false) =
 	let expr_next = expr_next ~in_case:in_case in parser
@@ -1375,8 +1377,24 @@ and expr ?(in_case=false) =
 			arrow_function p1 al e
 		| [<  e = expr; s >] -> (match s with parser
 			| [< '(PClose,p2); s >] -> expr_next (EParenthesis e, punion p1 p2) s
+			| [< '(Const (Ident "is"),p_is); t = parse_type_path; '(PClose,p2); >] -> expr_next (make_is e t (punion p1 p2) p_is) s
 			| [< '(Comma,pc); al = psep Comma parse_fun_param; '(PClose,_); '(Arrow,pa); e2 = expr; s >] ->
+				prerr_endline ("Comma,pc e:" ^ (Ast.s_expr e) ^  "e2:" ^ (Ast.s_expr e2));
 				arrow_function p1 ((arrow_first_param e) :: al) e2
+			| [< '((Binop OpAssign),p2); ea1 = expr; s >] ->
+				let with_args al e2 = (match e with
+					| ECheckType((EConst(Ident n),p),(t,pt)),_ ->
+						arrow_function p1 (((n,snd e),true,[],(Some(t,pt)),(Some ea1)) :: al) e2
+					| _ -> serror())
+				in
+				(match s with parser
+				| [< '(PClose,p2); '(Arrow,pa); e2 = expr; >] ->
+					with_args [] e2
+				| [< '(Comma,pc); al = psep Comma parse_fun_param; '(PClose,_); '(Arrow,pa); e2 = expr; >] ->
+					with_args al e2
+				| [< >] -> serror())
+			| [< >] -> serror())
+			(*
 			| [< t,pt = parse_type_hint_with_pos; s >] -> (match s with parser
 				| [< '(PClose,p2); s >] -> expr_next (EParenthesis (ECheckType(e,(t,pt)),punion p1 p2), punion p1 p2) s
 				| [< '(Comma,pc); al = psep Comma parse_fun_param; '(PClose,_); '(Arrow,pa); e2 = expr; s >] ->
@@ -1394,10 +1412,10 @@ and expr ?(in_case=false) =
 						with_args al e2
 					| [< >] -> serror())
 				| [< >] -> serror()
-			)
+			) *)
+			(*
 			| [< t,pt = parse_type_hint_with_pos; '(PClose,p2); s >] -> expr_next (EParenthesis (ECheckType(e,(t,pt)),punion p1 p2), punion p1 p2) s
-			| [< '(Const (Ident "is"),p_is); t = parse_type_path; '(PClose,p2); >] -> expr_next (make_is e t (punion p1 p2) p_is) s
-			| [< >] -> serror())
+			*)
 		)
 	| [< '(BkOpen,p1); l = parse_array_decl; '(BkClose,p2); s >] -> expr_next (EArrayDecl l, punion p1 p2) s
 	| [< '(Kwd Function,p1); e = parse_function p1 false; >] -> e
@@ -1496,7 +1514,13 @@ and expr_next ?(in_case=false) e1 =
 			raise (Display (make_binop op e1 e2)))
 	| [< '(Unop op,p) when is_postfix e1 op; s >] ->
 		expr_next (EUnop (op,Postfix,e1), punion (pos e1) p) s
+
+	| [< '(DblDot,pt) when not in_case; tpt = parse_complex_type_at pt >] ->
+		let p1 = snd e1 in
+		(ECheckType(e1,tpt),punion (snd e1) pt)
+		(* expr_next (EParenthesis (ECheckType(e1,(t,pt)),punion p1 pt), punion p1 pt) s *)
 (*
+    | [< '(DblDot,p1) when not in_case;; t = parse_complex_type_at p1 >] -> t
 	| [< '(DblDot,p) when not in_case; t,pt = parse_type_hint_with_pos; s >] ->
 		let p1 = snd e1 in
 		expr_next (EParenthesis (ECheckType(e1,(t,pt)),punion p1 pt), punion p1 pt) s
