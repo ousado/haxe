@@ -1239,35 +1239,25 @@ and parse_var_decls_next vl = parser
 			let e = (EVars(List.rev (v :: vl)),punion p1 (pos e)) in
 			display e
 		end
-	| [< >] ->
-		vl
+	| [< >] -> vl
 
-and parse_var_decls p1 = parser
-	| [< '(POpen,p1); v1 = dollar_ident; s >] ->
-		let destructure_tuple idl t nopt p2 =
-			let eo = parse_var_assignment s in (match eo with
+and parse_var_decls p1 =
+	let handle_destructuring tok_p s =
+		let v1,vl = parse_destructure tok_p s in
+		let tpt   = popt parse_type_hint_with_pos s in
+		let eo    = parse_var_assignment s in (match eo with
 			| Some(e) ->
-				let len = List.length idl in
-				let tuple = (match nopt with Some (n,_) -> n | _ -> "_t" ^ (string_of_int len)) in
-				let v1 = (tuple,(punion p1 p2)),t,eo in
-				let vl = List.mapi (fun idx (n,p) ->
-					let e =	EField( (EConst(Ident tuple),p),("_"^(string_of_int idx)) ),p in
-					(n,p),None,(Some e)
-				) idl in
-				prerr_endline (Ast.s_expr (EVars(v1 :: vl),punion p1 (pos e)) );
-				v1 :: vl
-				(* (EVars(v1 :: vl),punion p1 (pos e)) *)
-			| _ -> error (Custom "Missing assignment to tuple destructuring") p1)
-		in
-		(match s with parser
-			| [< '((Binop OpAssign),pa); '(POpen,p1); idl = psep Comma dollar_ident; '(PClose,p2); '(PClose,p2); t = popt parse_type_hint_with_pos; s >] ->
-				destructure_tuple idl t (Some v1) p2
-			| [< '(Comma,p1); idl = psep Comma dollar_ident; '(PClose,p2); t = popt parse_type_hint_with_pos; s >] ->
-				destructure_tuple (v1 :: idl) t None p2
-		)
-		(*idl = psep Comma dollar_ident; '(PClose,p2); t = popt parse_type_hint_with_pos; s >] ->*)
-
-
+				let v1n,v1p = v1 in
+				let vl = List.map ( fun (field_name,var_name,p) ->
+						(var_name,p),None,(Some (EField( (EConst(Ident v1n),p),field_name),p)) ) vl
+				in
+				let r = ((v1n,v1p),tpt,(Some e)) :: vl in
+				prerr_endline (Ast.s_expr (EVars(r),punion p1 (pos e)) );
+				r
+			| _ ->  error (Custom "Missing assignment to var destructuring expression") p1 )
+	in parser
+	| [< '(POpen,p1);  s >] -> handle_destructuring (POpen,p1)  s
+	| [< '(BrOpen,p1); s >] -> handle_destructuring (BrOpen,p1) s
 	| [< name,t,pn = parse_var_decl_head; s >] ->
 		let eo = parse_var_assignment s in
 		List.rev (parse_var_decls_next [(name,pn),t,eo] s)
@@ -1275,6 +1265,68 @@ and parse_var_decls p1 = parser
 
 and parse_var_decl = parser
 	| [< name,t,pn = parse_var_decl_head; eo = parse_var_assignment >] -> ((name,pn),t,eo)
+
+
+and parse_destructure (tok,p1) s =
+	(*
+		input : either POpen or BrOpen with position
+		1.     	{ -> parse sequence of ident or ident:ident
+				or
+				( -> ident
+				        ,      parse sequence of ident
+						= ( -> parse sequence of ident
+						= { -> parse sequence of ident or ident:ident
+
+		returns a tuple:  (capture_ident,pos) * ( ident,ident,pos ) list
+
+		let v1 = (tuple,(punion p1 p2)),t,eo in
+		let vl = List.mapi (fun idx (n,p) ->
+			let e =	EField( (EConst(Ident tuple),p),("_"^(string_of_int idx)) ),p in
+			(n,p),None,(Some e)
+		) idl in
+		prerr_endline (Ast.s_expr (EVars(v1 :: vl),punion p1 (pos e)) );
+	*)
+	let rec destructure_object_fields acc = parser
+		| [< name,pi = dollar_ident; s >] -> (match s with parser
+			| [< '(Comma,p); s >] ->
+				destructure_object_fields ((name,name,pi) :: acc) s
+			| [< '(DblDot,p); name2,pi2 = dollar_ident; s >] -> (match s with parser
+					| [< '(Comma,p); s >] ->
+						destructure_object_fields ((name,name2,punion pi pi2) :: acc) s
+					| [< '(BrClose,_); s >] -> (name,name2,pi2) :: acc )
+			| [< '(BrClose,_); s >] -> (name,name,pi) :: acc
+			| [<  >] -> serror()
+			)
+		| [<  >] -> serror()
+	in
+	let destructure_tuple_fields idl v1opt p1 =
+		let len = List.length idl in
+		let tuple = (match v1opt with Some (n,_) -> n | _ -> "_t" ^ (string_of_int len)) in
+		let v1 = tuple,p1 in
+		let vl = List.mapi (fun idx (n,p) -> ("_"^(string_of_int idx)),n,p ) idl in
+		v1,vl
+	in (match tok with
+		| BrOpen ->
+			let fields = List.rev (destructure_object_fields [] s) in
+			("_obj",p1),fields
+		| POpen -> begin match s with parser
+			 | [< v1 = dollar_ident; s >] -> prerr_endline "pd 0 ident"; (match s with parser
+				| [<'((Binop OpAssign),pa); s >] -> (match s with parser
+					| [< '(BrOpen,p1); fields = destructure_object_fields []; '(PClose,p2); s >] ->
+						let fields = List.rev fields in
+						v1,fields
+					| [< '(POpen,p1); idl = psep Comma dollar_ident; '(PClose,p2); '(PClose,p2); s >] ->
+						destructure_tuple_fields idl (Some v1) p1
+					)
+				| [< '(Comma,p); idl = psep Comma dollar_ident; '(PClose,p2); s >] ->
+					prerr_endline "pd 0 p comma";
+					destructure_tuple_fields (v1 :: idl) None p1
+				)
+			| [<  >] -> prerr_endline "pd 0 err"; serror()
+			end
+		| _ -> serror()
+	)
+
 
 and inline_function = parser
 	| [< '(Kwd Inline,_); '(Kwd Function,p1) >] -> true, p1
@@ -1333,6 +1385,8 @@ and arrow_first_param e =
 	| _ ->
 		let (np,tpt) = arrow_ident_checktype e in np,false,[],tpt,None
 	)
+
+and destructure_for_it e = ()
 
 
 and expr ?(in_case=false) =
@@ -1462,12 +1516,41 @@ and expr ?(in_case=false) =
 		| [< '(Const (Int i),p); e = expr_next (EConst (Int i),p) >] -> e
 		| [< '(Const (Float f),p); e = expr_next (EConst (Float f),p) >] -> e
 		| [< >] -> serror()) */*)
-	| [< '(Kwd For,p); '(POpen,_); it = expr; '(PClose,_); s >] ->
-		(try
-			let e = secure_expr s in
-			(EFor (it,e),punion p (pos e))
-		with
-			Display e -> display (EFor (it,e),punion p (pos e)))
+	| [< '(Kwd For,p); '(POpen,_); s >] ->
+		let handle_destructure p1 v1 vl s = (match s with parser
+			 | [< '(Kwd In,_); e2 = expr; '(PClose,pc); s >] ->
+			 	let v1n,v1p = v1 in
+				let ita = EConst(Ident v1n),v1p in
+				let it  = EIn(ita,e2),(punion v1p (pos e2)) in
+				let vl  = List.map ( fun (field_name,var_name,p) ->
+						(var_name,p),None,(Some (EField( ita, field_name),p)) ) vl
+				in
+				let evl = EVars(vl),v1p in
+			 	(try
+					let e = secure_expr s in
+					let e = EBlock([evl;e]),punion p (pos e) in
+					(EFor (it,e),punion p (pos e))
+				with
+					Display e -> display (EFor (it,e),punion p (pos e)))
+			 | [< >] -> error (Custom "Destructuring syntx in for requires for ( _ in _) _") (punion p p1)
+			)
+		in
+		(match s with parser
+			| [< '(Backtick,_); s >] -> (match s with parser
+				| [< '(POpen,p); s >]  ->
+					let v1, vl = parse_destructure (POpen,p) s
+					in handle_destructure p v1 vl s
+				| [< '(BrOpen,p); s >] ->
+					let v1, vl = parse_destructure (BrOpen,p) s
+					in handle_destructure p v1 vl s
+			)
+			| [< it = expr; '(PClose,_); s >] ->
+				(try
+					let e = secure_expr s in
+					(EFor (it,e),punion p (pos e))
+				with
+					Display e -> display (EFor (it,e),punion p (pos e)))
+		)
 	| [< '(Kwd If,p); '(POpen,_); cond = expr; '(PClose,_); e1 = expr; s >] ->
 		let e2 = (match s with parser
 			| [< '(Kwd Else,_); e2 = expr; s >] -> Some e2

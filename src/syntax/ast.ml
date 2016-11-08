@@ -126,6 +126,7 @@ type token =
 	| Question
 	| At
 	| Dollar of string
+	| Backtick
 
 type unop_flag =
 	| Prefix
