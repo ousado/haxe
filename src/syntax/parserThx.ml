@@ -1252,7 +1252,7 @@ and parse_var_decls p1 =
 						(var_name,p),None,(Some (EField( (EConst(Ident v1n),p),field_name),p)) ) vl
 				in
 				let r = ((v1n,v1p),tpt,(Some e)) :: vl in
-				prerr_endline (Ast.s_expr (EVars(r),punion p1 (pos e)) );
+				(*prerr_endline (Ast.s_expr (EVars(r),punion p1 (pos e)) );*)
 				r
 			| _ ->  error (Custom "Missing assignment to var destructuring expression") p1 )
 	in parser
@@ -1310,7 +1310,7 @@ and parse_destructure (tok,p1) s =
 			let fields = List.rev (destructure_object_fields [] s) in
 			("_obj",p1),fields
 		| POpen -> begin match s with parser
-			 | [< v1 = dollar_ident; s >] -> prerr_endline "pd 0 ident"; (match s with parser
+			 | [< v1 = dollar_ident; s >] -> (match s with parser
 				| [<'((Binop OpAssign),pa); s >] -> (match s with parser
 					| [< '(BrOpen,p1); fields = destructure_object_fields []; '(PClose,p2); s >] ->
 						let fields = List.rev fields in
@@ -1319,10 +1319,9 @@ and parse_destructure (tok,p1) s =
 						destructure_tuple_fields idl (Some v1) p1
 					)
 				| [< '(Comma,p); idl = psep Comma dollar_ident; '(PClose,p2); s >] ->
-					prerr_endline "pd 0 p comma";
 					destructure_tuple_fields (v1 :: idl) None p1
 				)
-			| [<  >] -> prerr_endline "pd 0 err"; serror()
+			| [<  >] -> serror()
 			end
 		| _ -> serror()
 	)
